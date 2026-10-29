@@ -1,0 +1,13 @@
+node_modules/
+
+dist/
+build/
+*.log
+coverage/
+.neon/
+# Firebase service account key — never commit this
+firebase-service-account.json
+google-services.json
+GoogleService-Info.plist
+# Environment variables
+
