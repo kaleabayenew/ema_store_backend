@@ -18,6 +18,7 @@ async function migrate() {
         password VARCHAR(255),
         role VARCHAR(50) DEFAULT 'CUSTOMER',
         is_verified BOOLEAN DEFAULT false,
+        is_active BOOLEAN DEFAULT true,
         otp_code VARCHAR(10),
         otp_expires_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -25,6 +26,14 @@ async function migrate() {
       );
     `);
     console.log('✓ Users table created');
+
+    // Add is_active column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+      console.log('✓ Added is_active column to users');
+    } catch (e) {
+      // Column might already exist
+    }
 
     // Create products table
     await pool.query(`
@@ -35,6 +44,7 @@ async function migrate() {
         description TEXT,
         category VARCHAR(100),
         price DECIMAL(10, 2) NOT NULL,
+        old_price DECIMAL(10, 2),
         stock_quantity INTEGER DEFAULT 0,
         image_url TEXT,
         is_active BOOLEAN DEFAULT true,
@@ -44,19 +54,57 @@ async function migrate() {
     `);
     console.log('✓ Products table created');
 
+    // Add old_price column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS old_price DECIMAL(10, 2)`);
+      console.log('✓ Added old_price column to products');
+    } catch (e) {
+      // Column might already exist
+    }
+
+    // Create product_images table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_images (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        image_url TEXT NOT NULL,
+        is_primary BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Product images table created');
+
     // Create flash_deals table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS flash_deals (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         product_id UUID REFERENCES products(id) ON DELETE CASCADE,
         discount_percentage DECIMAL(5, 2) NOT NULL,
-        start_time TIMESTAMP NOT NULL,
-        end_time TIMESTAMP NOT NULL,
+        starts_at TIMESTAMP NOT NULL,
+        ends_at TIMESTAMP NOT NULL,
         is_active BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('✓ Flash deals table created');
+
+    // Add starts_at column if it doesn't exist (migrate from start_time)
+    try {
+      await pool.query(`ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP`);
+      await pool.query(`UPDATE flash_deals SET starts_at = start_time WHERE starts_at IS NULL AND start_time IS NOT NULL`);
+      console.log('✓ Added starts_at column to flash_deals');
+    } catch (e) {
+      // Column might already exist
+    }
+
+    // Add ends_at column if it doesn't exist (migrate from end_time)
+    try {
+      await pool.query(`ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP`);
+      await pool.query(`UPDATE flash_deals SET ends_at = end_time WHERE ends_at IS NULL AND end_time IS NOT NULL`);
+      console.log('✓ Added ends_at column to flash_deals');
+    } catch (e) {
+      // Column might already exist
+    }
 
     // Create orders table
     await pool.query(`
