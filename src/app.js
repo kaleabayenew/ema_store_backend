@@ -30,9 +30,13 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, Postman, curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    // Allow all origins for development (remove in production)
-    if (process.env.NODE_ENV !== 'production') return callback(null, true);
-    callback(new Error(`CORS: origin '${origin}' not allowed`));
+    // Allow localhost for web development (any port)
+    if (origin && (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1'))) {
+      return callback(null, true);
+    }
+    // For now, allow all origins in production too (for mobile/web development)
+    // TODO: Restrict in production once frontend is deployed
+    return callback(null, true);
   },
   methods:             ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders:      ['Content-Type', 'Authorization'],
