@@ -42,7 +42,8 @@ async function startServer() {
 
 				// If phone number is provided in start parameter, auto-link it
 				if (startParam && startParam.trim()) {
-					const phone = startParam.trim();
+					// Decode URL-encoded phone number (Telegram sends it encoded)
+					let phone = decodeURIComponent(startParam.trim());
 					
 					// Validate phone number format
 					if (!phone.match(/^\+\d{10,15}$/)) {
@@ -341,11 +342,20 @@ This confirms your phone is linked correctly. You'll receive real codes when you
 						} else if (data.code === 'PHONE_ALREADY_LINKED') {
 							// Phone is already linked to a different Telegram account
 							bot.sendMessage(chatId, `
-⚠️ *Phone Already Linked*
+⚠️ *Wrong Telegram Account!*
 
-This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+You're currently logged into a different Telegram account than the one used for this phone number.
 
-Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+📱 **Your phone:** ${phone}
+👤 **Linked to account:** ${data.existing_username || 'a different Telegram account'}
+
+❌ *What to do:*
+1. Open Telegram
+2. Go to Settings → Switch Account
+3. Switch to the account: ${data.existing_username || 'your original account'}
+4. Open this bot again from that account
+
+Or contact support to unlink your phone number.
 							`, { 
 								parse_mode: 'Markdown',
 								reply_markup: {
@@ -436,11 +446,20 @@ This confirms your phone is linked correctly. You'll receive real codes when you
 					} else if (data.code === 'PHONE_ALREADY_LINKED') {
 						// Phone is already linked to a different Telegram account
 						bot.sendMessage(chatId, `
-⚠️ *Phone Already Linked*
+⚠️ *Wrong Telegram Account!*
 
-This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+You're currently logged into a different Telegram account than the one used for this phone number.
 
-Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+📱 **Your phone:** ${phone}
+👤 **Linked to account:** ${data.existing_username || 'a different Telegram account'}
+
+❌ *What to do:*
+1. Open Telegram
+2. Go to Settings → Switch Account
+3. Switch to the account: ${data.existing_username || 'your original account'}
+4. Open this bot again from that account
+
+Or contact support to unlink your phone number.
 						`, { parse_mode: 'Markdown' });
 					} else {
 						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
