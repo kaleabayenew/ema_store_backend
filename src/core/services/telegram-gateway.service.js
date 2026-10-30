@@ -3,19 +3,20 @@ const axios = require('axios');
 // ─────────────────────────────────────────────────────────────────────────────
 //  Telegram Gateway API Service
 //  Sends SMS OTP messages via Telegram Gateway API
+//  Documentation: https://core.telegram.org/gateway/api
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Configuration from environment variables
 const TELEGRAM_GATEWAY_API_KEY = process.env.TELEGRAM_GATEWAY_API_KEY;
 const TELEGRAM_GATEWAY_SENDER_ID = process.env.TELEGRAM_GATEWAY_SENDER_ID || 'EMAStore';
 
-// API endpoint
-const TELEGRAM_GATEWAY_URL = 'https://api.telegram-gateway.com/v1/sms/send';
+// API endpoint (corrected from documentation)
+const TELEGRAM_GATEWAY_URL = 'https://gatewayapi.telegram.org/sendVerificationMessage';
 
 /**
  * Send SMS via Telegram Gateway API
  * @param {string} phone - Phone number in E.164 format (+251XXXXXXXXX)
- * @param {string} message - SMS message content
+ * @param {string} message - SMS message content (OTP code will be extracted)
  * @returns {Promise<{ success: boolean, messageId?: string, error?: string }>}
  */
 async function sendSms(phone, message) {
@@ -26,24 +27,37 @@ async function sendSms(phone, message) {
   }
 
   try {
+    // Extract OTP code from message (assumes format: "Your ... code is XXXXXX")
+    const otpMatch = message.match(/\b\d{4,8}\b/);
+    const otpCode = otpMatch ? otpMatch[0] : null;
+
+    if (!otpCode) {
+      console.error('[Telegram Gateway] Could not extract OTP code from message');
+      console.log(`[SMS FALLBACK] ${phone}: ${message}`);
+      return { success: true, fallback: true };
+    }
+
     const response = await axios.post(TELEGRAM_GATEWAY_URL, {
-      api_key: TELEGRAM_GATEWAY_API_KEY,
-      sender_id: TELEGRAM_GATEWAY_SENDER_ID,
-      phone: phone,
-      message: message,
+      phone_number: phone,
+      code: otpCode,
+      code_length: otpCode.length,
+      sender_username: TELEGRAM_GATEWAY_SENDER_ID,
+      ttl: 900, // 15 minutes (in seconds)
     }, {
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${TELEGRAM_GATEWAY_API_KEY}`,
       },
       timeout: 10000, // 10 second timeout
     });
 
-    if (response.data && response.data.success) {
-      console.log(`[Telegram Gateway] SMS sent to ${phone}, Message ID: ${response.data.message_id}`);
-      return { success: true, messageId: response.data.message_id };
+    if (response.data && response.data.ok) {
+      const requestId = response.data.result?.request_id;
+      console.log(`[Telegram Gateway] SMS sent to ${phone}, Request ID: ${requestId}`);
+      return { success: true, messageId: requestId };
     } else {
       console.error('[Telegram Gateway] API returned error:', response.data);
-      return { success: false, error: response.data?.message || 'Unknown error' };
+      return { success: false, error: response.data?.error || 'Unknown error' };
     }
   } catch (error) {
     console.error('[Telegram Gateway] API request failed:', error.message);
