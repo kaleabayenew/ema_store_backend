@@ -3,6 +3,7 @@ const { pool } = require('../../core/config/database');
 const { signToken } = require('../../core/utils/jwt');
 const { AppError }  = require('../../core/errors/app_error');
 const { sendSms, formatOtpMessage } = require('../../core/services/telegram-gateway.service');
+const { sendOtp: sendTelegramBotOtp } = require('../../core/services/telegram-bot.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -28,7 +29,7 @@ const generateOtp = () =>
 const OTP_TTL_MINUTES = 15;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Send OTP  (persists to DB and sends via Telegram Gateway API)
+//  Send OTP  (persists to DB and sends via Telegram Bot or Gateway API)
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendOtp(phone, type = 'REGISTRATION') {
   const canonicalPhone = normalizePhone(phone);
@@ -48,9 +49,23 @@ async function sendOtp(phone, type = 'REGISTRATION') {
     [canonicalPhone, code, type, expiresAt],
   );
 
-  // Send OTP via Telegram Gateway API
-  const message = formatOtpMessage(code, type);
-  const smsResult = await sendSms(canonicalPhone, message);
+  // Try to send via Telegram Bot first (if user has linked their account)
+  const { rows: chatRows } = await pool.query(
+    'SELECT chat_id FROM telegram_chat_ids WHERE phone = $1',
+    [canonicalPhone],
+  );
+
+  let smsResult;
+  if (chatRows.length > 0) {
+    // Send via Telegram Bot (free)
+    const chatId = chatRows[0].chat_id;
+    smsResult = await sendTelegramBotOtp(chatId, code, type);
+    console.log(`[Telegram Bot] Sent to chat ${chatId}: ${code}`);
+  } else {
+    // Fallback to Telegram Gateway API (paid)
+    const message = formatOtpMessage(code, type);
+    smsResult = await sendSms(canonicalPhone, message);
+  }
 
   console.log(`[OTP] ${canonicalPhone} → ${code} (${type}, expires ${expiresAt.toISOString()})`);
   console.log(`[SMS Result] Success: ${smsResult.success}, Fallback: ${smsResult.fallback || false}`);
