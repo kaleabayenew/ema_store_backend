@@ -21,4 +21,14 @@ const requireAuth = (req, _res, next) => {
   }
 };
 
-module.exports = { requireAuth };
+/**
+ * adminOnly — Express middleware that checks if user has admin role.
+ */
+const adminOnly = (req, _res, next) => {
+  if (!req.user || req.user.role !== 'ADMIN') {
+    return next(new AppError('Admin access required.', 403, 'ADMIN_ONLY'));
+  }
+  next();
+};
+
+module.exports = { requireAuth, authenticate: requireAuth, adminOnly };

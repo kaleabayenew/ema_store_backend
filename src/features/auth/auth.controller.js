@@ -2,16 +2,16 @@ const service  = require('./auth.service');
 const { ok, created, error } = require('../../core/utils/response');
 
 // ── POST /api/v1/auth/register ─────────────────────────────────────────────
-// Body: { phone, fullName, password }
+// Body: { phone, fullName, password, referralCode? }
 // → Saves user to DB, sends OTP, returns { message }
 const register = async (req, res, next) => {
   try {
-    const { phone, fullName, password } = req.body;
+    const { phone, fullName, password, referralCode } = req.body;
 
     if (!phone || !fullName || !password)
       return error(res, 'phone, fullName and password are required.', 400, 'MISSING_FIELDS');
 
-    const otp = await service.registerStep1({ phone: phone.trim(), fullName, password });
+    const otp = await service.registerStep1({ phone: phone.trim(), fullName, password, referralCode });
 
     ok(res, {
       message: 'OTP sent. Please verify your phone number.',
@@ -23,16 +23,16 @@ const register = async (req, res, next) => {
 };
 
 // ── POST /api/v1/auth/register/verify ─────────────────────────────────────
-// Body: { phone, code }
+// Body: { phone, code, referralCode? }
 // → Verifies OTP, activates account, returns { token, user }
 const registerVerify = async (req, res, next) => {
   try {
-    const { phone, code } = req.body;
+    const { phone, code, referralCode } = req.body;
 
     if (!phone || !code)
       return error(res, 'phone and code are required.', 400, 'MISSING_FIELDS');
 
-    const result = await service.registerStep2({ phone: phone.trim(), code: code.trim() });
+    const result = await service.registerStep2({ phone: phone.trim(), code: code.trim(), referralCode });
 
     created(res, result);
   } catch (err) {

@@ -106,7 +106,7 @@ async function verifyOtp(phone, code, type = 'REGISTRATION') {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Register  — Step 1: persist user + profile, Step 2: confirm via OTP
 // ─────────────────────────────────────────────────────────────────────────────
-async function registerStep1({ phone, fullName, password }) {
+async function registerStep1({ phone, fullName, password, referralCode }) {
   const canonicalPhone = normalizePhone(phone);
 
   // Check existing user
@@ -164,15 +164,70 @@ async function registerStep1({ phone, fullName, password }) {
   return sendOtp(canonicalPhone, 'REGISTRATION');
 }
 
-async function registerStep2({ phone, code }) {
+async function registerStep2({ phone, code, referralCode }) {
   const canonicalPhone = normalizePhone(phone);
   await verifyOtp(canonicalPhone, code, 'REGISTRATION');
 
-  // Activate user in DB
-  await pool.query(
-    `UPDATE users SET is_active = true, updated_at = NOW() WHERE phone = $1`,
-    [canonicalPhone],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Activate user in DB
+    await client.query(
+      `UPDATE users SET is_active = true, updated_at = NOW() WHERE phone = $1`,
+      [canonicalPhone],
+    );
+
+    // Apply referral code if provided
+    if (referralCode) {
+      const { rows: userRows } = await client.query(
+        'SELECT id FROM users WHERE phone = $1',
+        [canonicalPhone]
+      );
+      
+      if (userRows.length > 0) {
+        const userId = userRows[0].id;
+        
+        // Validate referral code
+        const { rows: referralRows } = await client.query(
+          `SELECT * FROM referral_codes 
+           WHERE code = $1 AND is_active = true 
+           AND (expires_at IS NULL OR expires_at > NOW())
+           AND total_uses < max_uses`,
+          [referralCode]
+        );
+
+        if (referralRows.length > 0) {
+          const referral = referralRows[0];
+          
+          // Update user with referral
+          await client.query(
+            'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
+            [referral.user_id, referral.reward_coins, userId]
+          );
+
+          // Increment referral usage
+          await client.query(
+            'UPDATE referral_codes SET total_uses = total_uses + 1 WHERE id = $1',
+            [referral.id]
+          );
+
+          // Give coins to referrer
+          await client.query(
+            'UPDATE users SET coins = coins + $2 WHERE id = $1',
+            [referral.user_id, referral.reward_coins]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 
   return _buildAuthResponse(canonicalPhone);
 }
@@ -187,7 +242,7 @@ async function login({ phone, email, password }) {
   // Determine query based on whether phone or email is provided
   let query, param;
   if (canonicalPhone) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -195,7 +250,7 @@ async function login({ phone, email, password }) {
              WHERE u.phone = $1`;
     param = canonicalPhone;
   } else if (normalizedEmail) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -230,7 +285,9 @@ async function login({ phone, email, password }) {
       email: user.email,
       fullName: user.full_name || user.email || '',
       role: user.role,
-      adminRole: user.admin_role,
+      adminRole: user.adminRole,
+      balance: parseFloat(user.balance) || 0,
+      coins: user.coins || 0,
     },
   };
 }
@@ -268,7 +325,7 @@ async function forgotPasswordStep2({ phone, code, newPassword }) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function _buildAuthResponse(canonicalPhone) {
   const { rows } = await pool.query(
-    `SELECT u.id, u.phone, u.email, u.role, cp.full_name, au.admin_role
+    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, cp.full_name, au.admin_role
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
      LEFT JOIN admin_user au ON au.user_id = u.id
@@ -287,7 +344,9 @@ async function _buildAuthResponse(canonicalPhone) {
       email: user.email,
       fullName: user.full_name || user.email || '',
       role: user.role,
-      adminRole: user.admin_role,
+      adminRole: user.adminRole,
+      balance: parseFloat(user.balance) || 0,
+      coins: user.coins || 0,
     },
   };
 }

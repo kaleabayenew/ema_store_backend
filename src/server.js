@@ -53,7 +53,14 @@ async function startServer() {
 The phone number format is incorrect. Please try again.
 
 Expected format: +251912345678
-						`, { parse_mode: 'Markdown' });
+						`, { 
+							parse_mode: 'Markdown',
+							reply_markup: {
+								inline_keyboard: [
+									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+								]
+							}
+						});
 						return;
 					}
 
@@ -137,7 +144,14 @@ Please use the same Telegram account that you originally registered with, or con
 Phone: ${data.phone}
 
 You will receive verification codes here when you register or reset your password in the Ema Store app.
-						`, { parse_mode: 'Markdown' });
+						`, { 
+							parse_mode: 'Markdown',
+							reply_markup: {
+								inline_keyboard: [
+									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+								]
+							}
+						});
 						return;
 					}
 				} catch (error) {
@@ -203,6 +217,24 @@ Please share your phone number to link it:
 					if (data.success) {
 						pendingPhoneRequests.delete(chatId);
 						
+						// Generate referral code for the user
+						let referralCode = null;
+						try {
+							const referralResponse = await fetch(`${backendUrl}/api/v1/referral/generate`, {
+								method: 'POST',
+								headers: {
+									'Content-Type': 'application/json',
+									'Authorization': `Bearer ${data.token}`, // If needed
+								},
+							});
+							const referralData = await referralResponse.json();
+							if (referralData.success) {
+								referralCode = referralData.data.code;
+							}
+						} catch (e) {
+							console.log('[Telegram Bot] Failed to generate referral code:', e.message);
+						}
+						
 						// Send a test OTP to verify the link works
 						const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
 						await bot.sendMessage(chatId, `
@@ -214,7 +246,10 @@ We'll send a test code to verify everything is working...
 						`, { 
 							parse_mode: 'Markdown',
 							reply_markup: {
-								remove_keyboard: true
+								remove_keyboard: true,
+								inline_keyboard: [
+									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+								]
 							}
 						});
 
@@ -227,9 +262,36 @@ We'll send a test code to verify everything is working...
 Your test code is: *${testOtp}*
 
 This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
-								`, { parse_mode: 'Markdown' });
-							} catch (error) {
-								console.error('[Bot] Failed to send test OTP:', error);
+								`, { 
+									parse_mode: 'Markdown',
+									reply_markup: {
+										inline_keyboard: [
+											[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+										]
+									}
+								});
+								
+								// Send referral link if generated
+								if (referralCode) {
+									await bot.sendMessage(chatId, `
+🎁 *Your Referral Link*
+
+Share this link with friends and earn 50 coins for each signup!
+
+Your referral code: \`${referralCode}\`
+
+Referral link: https://t.me/ema_store_bot?start=${referralCode}
+									`, { 
+										parse_mode: 'Markdown',
+										reply_markup: {
+											inline_keyboard: [
+												[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+											]
+										}
+									});
+								}
+							} catch (err) {
+								console.log('[Telegram Bot] Error sending test OTP:', err.message);
 							}
 						}, 1000);
 					} else if (data.code === 'PHONE_ALREADY_LINKED') {
@@ -247,7 +309,13 @@ Please use the same Telegram account that you originally registered with, or con
 							}
 						});
 					} else {
-						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
+						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`, {
+							reply_markup: {
+								inline_keyboard: [
+									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+								]
+							}
+						});
 					}
 				} catch (error) {
 					console.error('[Bot] Link error:', error);
@@ -359,7 +427,10 @@ Or contact support to unlink your phone number.
 							`, { 
 								parse_mode: 'Markdown',
 								reply_markup: {
-									remove_keyboard: true
+									remove_keyboard: true,
+									inline_keyboard: [
+										[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+									]
 								}
 							});
 						} else {
@@ -462,7 +533,13 @@ You're currently logged into a different Telegram account than the one used for 
 Or contact support to unlink your phone number.
 						`, { parse_mode: 'Markdown' });
 					} else {
-						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
+						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`, {
+							reply_markup: {
+								inline_keyboard: [
+									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
+								]
+							}
+						});
 					}
 				} catch (error) {
 					console.error('[Bot] Link error:', error);

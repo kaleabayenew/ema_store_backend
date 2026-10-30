@@ -263,6 +263,8 @@ const flashDealsRouter = require('./features/flash-deals/flash-deals.router');
 const productsRouter = require('./features/products/products.router');
 const uploadRouter = require('./features/upload/upload.router');
 const telegramRouter = require('./features/telegram/telegram.routes');
+const referralRouter = require('./features/referral/referral.routes');
+const specialOffersRouter = require('./features/special-offers/special-offers.router');
 
 const app = express();
 
@@ -311,6 +313,8 @@ app.use('/api/v1/flash-deals', flashDealsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/v1/upload', uploadRouter);
 app.use('/api/v1/telegram', telegramRouter);
+app.use('/api/v1/referral', referralRouter);
+app.use('/api/v1/special-offers', specialOffersRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
