@@ -10,7 +10,8 @@
     "migrate": "node scripts/migrate.js",
     "migrate:products": "node scripts/migrate-products.js",
     "seed:admins": "node scripts/seed-admins.js",
-    "seed:products": "node scripts/seed-products.js"
+    "seed:products": "node scripts/seed-products.js",
+    "bot": "node scripts/telegram-bot.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -32,6 +33,7 @@
     "firebase-admin": "^14.5.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.5.0",
+    "node-telegram-bot-api": "^0.66.0",
     "pg": "^8.23.1",
     "uuid": "^14.0.3"
   },
