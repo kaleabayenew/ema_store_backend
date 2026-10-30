@@ -23,7 +23,7 @@ async function getAllProducts({
   let query = `
     SELECT
       p.*,
-      pi.url as primary_image_url,
+      pi.image_url as primary_image_url,
       c.name_en as category_name,
       c.slug as category_slug,
       pp.shop_name as partner_name,
