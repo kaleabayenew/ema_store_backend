@@ -225,6 +225,19 @@ async function autoMigrate() {
     `);
     console.log('[Migration] ✓ Admin user table');
 
+    // Create telegram_chat_ids table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS telegram_chat_ids (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        phone VARCHAR(20) UNIQUE NOT NULL,
+        chat_id BIGINT NOT NULL,
+        username VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Telegram chat IDs table');
+
     console.log('[Migration] ✅ Auto-migration completed successfully!');
   } catch (error) {
     console.error('[Migration] ❌ Auto-migration failed:', error.message);
@@ -249,6 +262,7 @@ const notificationsRouter = require('./features/notifications/notifications.rout
 const flashDealsRouter = require('./features/flash-deals/flash-deals.router');
 const productsRouter = require('./features/products/products.router');
 const uploadRouter = require('./features/upload/upload.router');
+const telegramRouter = require('./features/telegram/telegram.routes');
 
 const app = express();
 
@@ -296,6 +310,7 @@ app.use('/api/v1/notifications', notificationsRouter);
 app.use('/api/v1/flash-deals', flashDealsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/v1/upload', uploadRouter);
+app.use('/api/v1/telegram', telegramRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
