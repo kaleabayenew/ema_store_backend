@@ -239,6 +239,8 @@ async function login({ phone, email, password }) {
   const canonicalPhone = phone ? normalizePhone(phone) : null;
   const normalizedEmail = email ? email.trim().toLowerCase() : null;
 
+  console.log('[Auth Service] Login attempt:', { canonicalPhone, normalizedEmail });
+
   // Determine query based on whether phone or email is provided
   let query, param;
   if (canonicalPhone) {
@@ -264,6 +266,8 @@ async function login({ phone, email, password }) {
   const { rows } = await pool.query(query, [param]);
   const user = rows[0];
 
+  console.log('[Auth Service] User found:', !!user, 'Active:', user?.is_active);
+
   if (!user) {
     throw new AppError('Account not found. Please check your credentials.', 401, 'USER_NOT_FOUND');
   }
@@ -272,11 +276,13 @@ async function login({ phone, email, password }) {
   }
 
   const match = await bcrypt.compare(password, user.password_hash);
+  console.log('[Auth Service] Password match:', match);
   if (!match) {
     throw new AppError('Incorrect password. Please try again.', 401, 'WRONG_PASSWORD');
   }
 
   const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.role, adminRole: user.admin_role });
+  console.log('[Auth Service] Token generated successfully');
   return {
     token,
     user: {

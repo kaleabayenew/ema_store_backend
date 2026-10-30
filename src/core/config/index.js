@@ -8,6 +8,8 @@ const allowedOrigins = [
   process.env.CUSTOMER_APP_URL_ANDROID,
   process.env.CUSTOMER_APP_URL_IOS,
   process.env.CUSTOMER_APP_URL_WEB,
+  // Web admin panel
+  'https://ema-store-web.onrender.com',
   // Allow local development servers
   'http://localhost:5173',
   'http://127.0.0.1:5173',

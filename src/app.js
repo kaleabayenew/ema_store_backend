@@ -270,6 +270,12 @@ const app = express();
 
 app.disable('x-powered-by');
 
+// ── Request logging ─────────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  console.log(`[Request] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
+  next();
+});
+
 // ── CORS ───────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: (origin, callback) => {

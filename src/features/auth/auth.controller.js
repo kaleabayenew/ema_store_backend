@@ -48,19 +48,24 @@ const login = async (req, res, next) => {
   try {
     const { phone, email, password } = req.body;
 
+    console.log('[Auth Login] Request received:', { phone, email, hasPassword: !!password });
+
     if (!password)
       return error(res, 'password is required.', 400, 'MISSING_FIELDS');
     if (!phone && !email)
       return error(res, 'phone or email is required.', 400, 'MISSING_FIELDS');
 
+    console.log('[Auth Login] Attempting login service...');
     const result = await service.login({
       phone: phone ? phone.trim() : null,
       email: email ? email.trim() : null,
       password,
     });
 
+    console.log('[Auth Login] Login successful for:', result.user.phone || result.user.email);
     ok(res, result);
   } catch (err) {
+    console.error('[Auth Login] Error:', err.message);
     next(err);
   }
 };
