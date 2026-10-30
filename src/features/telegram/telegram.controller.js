@@ -30,25 +30,42 @@ async function linkTelegram(req, res) {
       ? `+251${canonicalPhone.substring(1)}`
       : `+251${canonicalPhone}`;
 
-    // Check if already linked
+    // Check if phone is already linked to a different chat ID
     const { rows } = await pool.query(
-      'SELECT id FROM telegram_chat_ids WHERE phone = $1',
+      'SELECT chat_id, username FROM telegram_chat_ids WHERE phone = $1',
       [normalizedPhone],
     );
 
     if (rows.length > 0) {
-      // Update existing
-      await pool.query(
-        'UPDATE telegram_chat_ids SET chat_id = $1, username = $2, updated_at = NOW() WHERE phone = $3',
-        [chat_id, username || null, normalizedPhone],
-      );
-    } else {
-      // Insert new
-      await pool.query(
-        'INSERT INTO telegram_chat_ids (phone, chat_id, username) VALUES ($1, $2, $3)',
-        [normalizedPhone, chat_id, username || null],
-      );
+      const existingChatId = rows[0].chat_id;
+      const existingUsername = rows[0].username;
+      
+      // If linked to the same chat ID, just update username
+      if (existingChatId === chat_id) {
+        await pool.query(
+          'UPDATE telegram_chat_ids SET username = $2, updated_at = NOW() WHERE phone = $1',
+          [normalizedPhone, username || null],
+        );
+        return res.json({
+          success: true,
+          message: 'Telegram account updated successfully',
+        });
+      }
+      
+      // If linked to a different chat ID, warn the user
+      return res.status(409).json({
+        success: false,
+        code: 'PHONE_ALREADY_LINKED',
+        message: 'This phone number is already linked to a different Telegram account. Please use the same Telegram account that you originally registered with.',
+        existing_username: existingUsername,
+      });
     }
+
+    // Insert new
+    await pool.query(
+      'INSERT INTO telegram_chat_ids (phone, chat_id, username) VALUES ($1, $2, $3)',
+      [normalizedPhone, chat_id, username || null],
+    );
 
     res.json({
       success: true,

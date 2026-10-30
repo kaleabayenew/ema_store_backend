@@ -35,11 +35,88 @@ async function startServer() {
 			console.log('🤖 Telegram Bot: Starting...');
 
 			// Handle /start command
-			bot.onText(/\/start/, async (msg) => {
+			bot.onText(/\/start(?: (.+))?/, async (msg, match) => {
 				const chatId = msg.chat.id;
 				const username = msg.from.username;
+				const startParam = match[1]; // The phone number from deep link
 
-				// Check if user already has a linked phone number
+				// If phone number is provided in start parameter, auto-link it
+				if (startParam && startParam.trim()) {
+					const phone = startParam.trim();
+					
+					// Validate phone number format
+					if (!phone.match(/^\+\d{10,15}$/)) {
+						bot.sendMessage(chatId, `
+❌ *Invalid Phone Number Format*
+
+The phone number format is incorrect. Please try again.
+
+Expected format: +251912345678
+						`, { parse_mode: 'Markdown' });
+						return;
+					}
+
+					try {
+						const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
+						const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
+							method: 'POST',
+							headers: {
+								'Content-Type': 'application/json',
+							},
+							body: JSON.stringify({
+								phone: phone,
+								chat_id: chatId,
+								username: username,
+							}),
+						});
+
+						const data = await response.json();
+
+						if (data.success) {
+							// Send a test OTP to verify the link works
+							const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
+							await bot.sendMessage(chatId, `
+✅ *Phone Number Linked Successfully!*
+
+Your phone number: ${phone}
+
+We'll send a test code to verify everything is working...
+							`, { parse_mode: 'Markdown' });
+
+							// Send test OTP after a short delay
+							setTimeout(async () => {
+								try {
+									await bot.sendMessage(chatId, `
+🔐 *Test Verification Code*
+
+Your test code is: *${testOtp}*
+
+This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
+									`, { parse_mode: 'Markdown' });
+								} catch (error) {
+									console.error('[Bot] Failed to send test OTP:', error);
+								}
+							}, 1000);
+						} else if (data.code === 'PHONE_ALREADY_LINKED') {
+							// Phone is already linked to a different Telegram account
+							bot.sendMessage(chatId, `
+⚠️ *Phone Already Linked*
+
+This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+
+Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+							`, { parse_mode: 'Markdown' });
+						} else {
+							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
+						}
+					} catch (error) {
+						console.error('[Bot] Link error:', error);
+						bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
+					}
+					return;
+				}
+
+				// No phone number in start parameter - check if already linked
 				try {
 					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
 					const response = await fetch(`${backendUrl}/api/v1/telegram/check/${chatId}`, {
@@ -154,6 +231,20 @@ This confirms your phone is linked correctly. You'll receive real codes when you
 								console.error('[Bot] Failed to send test OTP:', error);
 							}
 						}, 1000);
+					} else if (data.code === 'PHONE_ALREADY_LINKED') {
+						// Phone is already linked to a different Telegram account
+						bot.sendMessage(chatId, `
+⚠️ *Phone Already Linked*
+
+This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+
+Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+						`, { 
+							parse_mode: 'Markdown',
+							reply_markup: {
+								remove_keyboard: true
+							}
+						});
 					} else {
 						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 					}
@@ -247,6 +338,20 @@ This confirms your phone is linked correctly. You'll receive real codes when you
 									console.error('[Bot] Failed to send test OTP:', error);
 								}
 							}, 1000);
+						} else if (data.code === 'PHONE_ALREADY_LINKED') {
+							// Phone is already linked to a different Telegram account
+							bot.sendMessage(chatId, `
+⚠️ *Phone Already Linked*
+
+This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+
+Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+							`, { 
+								parse_mode: 'Markdown',
+								reply_markup: {
+									remove_keyboard: true
+								}
+							});
 						} else {
 							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 						}
@@ -328,6 +433,15 @@ This confirms your phone is linked correctly. You'll receive real codes when you
 								console.error('[Bot] Failed to send test OTP:', error);
 							}
 						}, 1000);
+					} else if (data.code === 'PHONE_ALREADY_LINKED') {
+						// Phone is already linked to a different Telegram account
+						bot.sendMessage(chatId, `
+⚠️ *Phone Already Linked*
+
+This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+
+Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
+						`, { parse_mode: 'Markdown' });
 					} else {
 						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 					}
