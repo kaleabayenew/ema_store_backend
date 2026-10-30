@@ -41,7 +41,6 @@ async function sendSms(phone, message) {
       phone_number: phone,
       code: otpCode,
       code_length: otpCode.length,
-      sender_username: TELEGRAM_GATEWAY_SENDER_ID,
       ttl: 900, // 15 minutes (in seconds)
     }, {
       headers: {
