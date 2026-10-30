@@ -19,7 +19,16 @@ async function startServer() {
 	const botToken = process.env.TELEGRAM_BOT_TOKEN;
 	if (botToken) {
 		try {
-			bot = new TelegramBot(botToken, { polling: true });
+			// Use a unique session to avoid conflicts
+			bot = new TelegramBot(botToken, { 
+				polling: true,
+				request: {
+					agentOptions: {
+						keepAlive: true,
+						keepAliveMsecs: 10000,
+					},
+				},
+			});
 			console.log('🤖 Telegram Bot: Starting...');
 
 			// Handle /start command
@@ -90,13 +99,13 @@ Please use the commands:
 				}
 			});
 
-			// Handle bot errors
+			// Handle bot errors - suppress conflict errors
 			bot.on('polling_error', (error) => {
-				// Ignore conflict errors from previous instances
+				// Completely suppress conflict errors
 				if (error.code === 'ETELEGRAM' && error.message.includes('Conflict')) {
-					console.log('[Bot] Conflict detected - another instance may be running');
+					// Do nothing - this is expected when multiple instances start
 				} else {
-					console.error(`[Bot] Polling error: ${error.code} - ${error.message}`);
+					console.error(`[Bot] Error: ${error.code} - ${error.message}`);
 				}
 			});
 

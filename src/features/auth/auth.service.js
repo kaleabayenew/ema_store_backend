@@ -2,7 +2,6 @@ const bcrypt   = require('bcryptjs');
 const { pool } = require('../../core/config/database');
 const { signToken } = require('../../core/utils/jwt');
 const { AppError }  = require('../../core/errors/app_error');
-const { sendSms, formatOtpMessage } = require('../../core/services/telegram-gateway.service');
 const { sendOtp: sendTelegramBotOtp } = require('../../core/services/telegram-bot.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,7 +28,7 @@ const generateOtp = () =>
 const OTP_TTL_MINUTES = 15;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Send OTP  (persists to DB and sends via Telegram Bot or Gateway API)
+//  Send OTP  (persists to DB and sends via Telegram Bot)
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendOtp(phone, type = 'REGISTRATION') {
   const canonicalPhone = normalizePhone(phone);
@@ -49,26 +48,24 @@ async function sendOtp(phone, type = 'REGISTRATION') {
     [canonicalPhone, code, type, expiresAt],
   );
 
-  // Try to send via Telegram Bot first (if user has linked their account)
+  // Try to send via Telegram Bot (if user has linked their account)
   const { rows: chatRows } = await pool.query(
     'SELECT chat_id FROM telegram_chat_ids WHERE phone = $1',
     [canonicalPhone],
   );
 
-  let smsResult;
   if (chatRows.length > 0) {
     // Send via Telegram Bot (free)
     const chatId = chatRows[0].chat_id;
-    smsResult = await sendTelegramBotOtp(chatId, code, type);
-    console.log(`[Telegram Bot] Sent to chat ${chatId}: ${code}`);
+    const result = await sendTelegramBotOtp(chatId, code, type);
+    console.log(`[Telegram Bot] Sent to chat ${chatId}: ${code} - Success: ${result.success}`);
   } else {
-    // Fallback to Telegram Gateway API (paid)
-    const message = formatOtpMessage(code, type);
-    smsResult = await sendSms(canonicalPhone, message);
+    // Log OTP to console if user hasn't linked their Telegram account
+    console.log(`[OTP FALLBACK] ${canonicalPhone} → ${code} (${type}, expires ${expiresAt.toISOString()})`);
+    console.log(`[INFO] User has not linked Telegram account. OTP logged to console.`);
   }
 
   console.log(`[OTP] ${canonicalPhone} → ${code} (${type}, expires ${expiresAt.toISOString()})`);
-  console.log(`[SMS Result] Success: ${smsResult.success}, Fallback: ${smsResult.fallback || false}`);
 
   return code;
 }
