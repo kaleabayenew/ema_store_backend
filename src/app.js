@@ -35,6 +35,21 @@ async function autoMigrate() {
       // Column might already exist
     }
 
+    // Add email column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) UNIQUE`);
+    } catch (e) {
+      // Column might already exist
+    }
+
+    // Add password_hash column if it doesn't exist (migrate from password)
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)`);
+      await pool.query(`UPDATE users SET password_hash = password WHERE password_hash IS NULL AND password IS NOT NULL`);
+    } catch (e) {
+      // Column might already exist
+    }
+
     // Create products table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
@@ -72,6 +87,20 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ Product images table');
+
+    // Create categories table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS categories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL UNIQUE,
+        description TEXT,
+        image_url TEXT,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Categories table');
 
     // Create flash_deals table
     await pool.query(`
@@ -155,6 +184,46 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ FCM tokens table');
+
+    // Create otp_codes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS otp_codes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        phone VARCHAR(20) NOT NULL,
+        code VARCHAR(10) NOT NULL,
+        type VARCHAR(20) DEFAULT 'REGISTER',
+        expires_at TIMESTAMP NOT NULL,
+        is_used BOOLEAN DEFAULT false,
+        attempts INTEGER DEFAULT 0,
+        max_attempts INTEGER DEFAULT 3,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ OTP codes table');
+
+    // Create customer_user table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS customer_user (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        full_name VARCHAR(255),
+        avatar_url TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Customer user table');
+
+    // Create admin_user table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admin_user (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        admin_role VARCHAR(50),
+        full_name VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Admin user table');
 
     console.log('[Migration] ✅ Auto-migration completed successfully!');
   } catch (error) {
