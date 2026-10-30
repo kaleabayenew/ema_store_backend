@@ -3,6 +3,9 @@ const { port } = require('./core/config');
 const { checkDatabaseConnection, pool } = require('./core/config/database');
 const TelegramBot = require('node-telegram-bot-api');
 
+// Store pending phone number requests (chatId -> timestamp)
+const pendingPhoneRequests = new Map();
+
 async function startServer() {
 	let databaseConnected = false;
 
@@ -32,28 +35,216 @@ async function startServer() {
 			console.log('🤖 Telegram Bot: Starting...');
 
 			// Handle /start command
-			bot.onText(/\/start/, (msg) => {
+			bot.onText(/\/start/, async (msg) => {
 				const chatId = msg.chat.id;
+				const username = msg.from.username;
+
+				// Check if user already has a linked phone number
+				try {
+					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
+					const response = await fetch(`${backendUrl}/api/v1/telegram/check/${chatId}`, {
+						method: 'GET',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+					});
+
+					const data = await response.json();
+
+					if (data.success && data.phone) {
+						// Phone already linked
+						bot.sendMessage(chatId, `
+✅ *Your phone is already linked!*
+
+Phone: ${data.phone}
+
+You will receive verification codes here when you register or reset your password in the Ema Store app.
+						`, { parse_mode: 'Markdown' });
+						return;
+					}
+				} catch (error) {
+					console.error('[Bot] Check link error:', error);
+				}
+
+				// Phone not linked, ask user to share it
+				pendingPhoneRequests.set(chatId, Date.now());
 				bot.sendMessage(chatId, `
 👋 *Welcome to Ema Store Bot!*
 
 This bot will send you verification codes when you register or reset your password.
 
-To link your phone number, please use the following command:
+Please share your phone number to link it:
 
-/link <your_phone_number>
-
-Example: /link +251912345678
-
-Make sure to include your country code (+251 for Ethiopia).
-				`, { parse_mode: 'Markdown' });
+📱 *Option 1:* Click the button below to share your phone number
+📱 *Option 2:* Type it manually: +251912345678
+				`, {
+					parse_mode: 'Markdown',
+					reply_markup: {
+						keyboard: [
+							[{ text: '📱 Share my phone number', request_contact: true }]
+						],
+						one_time_keyboard: true,
+						resize_keyboard: true
+					}
+				});
 			});
 
-			// Handle /link command
+			// Handle contact sharing (when user clicks "Share my phone number")
+			bot.on('contact', async (msg) => {
+				const chatId = msg.chat.id;
+				const contact = msg.contact;
+				const username = msg.from.username;
+
+				if (!contact || !contact.phone_number) {
+					bot.sendMessage(chatId, '❌ Failed to get phone number. Please try again.');
+					return;
+				}
+
+				// Format phone number (add + if missing)
+				let phone = contact.phone_number;
+				if (!phone.startsWith('+')) {
+					phone = '+' + phone;
+				}
+
+				try {
+					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
+					const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({
+							phone: phone,
+							chat_id: chatId,
+							username: username,
+						}),
+					});
+
+					const data = await response.json();
+
+					if (data.success) {
+						pendingPhoneRequests.delete(chatId);
+						bot.sendMessage(chatId, `
+✅ *Phone Number Linked Successfully!*
+
+Your phone number: ${phone}
+
+You will receive verification codes here when you register or reset your password in the Ema Store app.
+						`, { 
+							parse_mode: 'Markdown',
+							reply_markup: {
+								remove_keyboard: true
+							}
+						});
+					} else {
+						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
+					}
+				} catch (error) {
+					console.error('[Bot] Link error:', error);
+					bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
+				}
+			});
+
+			// Handle phone number input (when user sends a number after /start)
+			bot.on('message', async (msg) => {
+				const chatId = msg.chat.id;
+				const text = msg.text;
+
+				// Skip commands and contacts
+				if (text?.startsWith('/') || msg.contact) return;
+
+				// Check if this is a pending phone number request
+				if (pendingPhoneRequests.has(chatId)) {
+					const phone = text.trim();
+					const username = msg.from.username;
+
+					// Validate phone number format (basic check)
+					if (!phone.match(/^\+\d{10,15}$/)) {
+						bot.sendMessage(chatId, `
+❌ *Invalid Phone Number Format*
+
+Please use the format: +251912345678
+
+Include the country code (+251 for Ethiopia) and 9-12 digits.
+
+Or click the button below to share your phone number automatically.
+						`, { 
+							parse_mode: 'Markdown',
+							reply_markup: {
+								keyboard: [
+									[{ text: '📱 Share my phone number', request_contact: true }]
+								],
+								one_time_keyboard: true,
+								resize_keyboard: true
+							}
+						});
+						return;
+					}
+
+					try {
+						const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
+						const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
+							method: 'POST',
+							headers: {
+								'Content-Type': 'application/json',
+							},
+							body: JSON.stringify({
+								phone: phone,
+								chat_id: chatId,
+								username: username,
+							}),
+						});
+
+						const data = await response.json();
+
+						if (data.success) {
+							pendingPhoneRequests.delete(chatId);
+							bot.sendMessage(chatId, `
+✅ *Phone Number Linked Successfully!*
+
+Your phone number: ${phone}
+
+You will receive verification codes here when you register or reset your password in the Ema Store app.
+							`, { 
+								parse_mode: 'Markdown',
+								reply_markup: {
+									remove_keyboard: true
+								}
+							});
+						} else {
+							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
+						}
+					} catch (error) {
+						console.error('[Bot] Link error:', error);
+						bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
+					}
+				} else {
+					// If not pending, show help
+					bot.sendMessage(chatId, `
+Please use the commands:
+- /start - Link your phone number
+- /link <phone> - Link your phone number directly
+					`);
+				}
+			});
+
+			// Handle /link command (direct link with phone number)
 			bot.onText(/\/link (.+)/, async (msg, match) => {
 				const chatId = msg.chat.id;
-				const phone = match[1];
+				const phone = match[1].trim();
 				const username = msg.from.username;
+
+				// Validate phone number format
+				if (!phone.match(/^\+\d{10,15}$/)) {
+					bot.sendMessage(chatId, `
+❌ *Invalid Phone Number Format*
+
+Please use the format: +251912345678
+
+Include the country code (+251 for Ethiopia) and 9-12 digits.
+					`, { parse_mode: 'Markdown' });
+					return;
+				}
 
 				try {
 					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
@@ -75,7 +266,7 @@ Make sure to include your country code (+251 for Ethiopia).
 						bot.sendMessage(chatId, `
 ✅ *Phone Number Linked Successfully!*
 
-Your phone number ${phone} is now linked to this Telegram bot.
+Your phone number: ${phone}
 
 You will receive verification codes here when you register or reset your password in the Ema Store app.
 						`, { parse_mode: 'Markdown' });
@@ -85,17 +276,6 @@ You will receive verification codes here when you register or reset your passwor
 				} catch (error) {
 					console.error('[Bot] Link error:', error);
 					bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
-				}
-			});
-
-			// Handle unknown commands
-			bot.on('message', (msg) => {
-				if (!msg.text?.startsWith('/')) {
-					bot.sendMessage(msg.chat.id, `
-Please use the commands:
-- /start - Show welcome message
-- /link <phone> - Link your phone number
-					`);
 				}
 			});
 

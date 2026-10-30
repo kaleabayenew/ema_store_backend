@@ -64,6 +64,49 @@ async function linkTelegram(req, res) {
   }
 }
 
+/**
+ * GET /api/v1/telegram/check/:chatId
+ * Checks if a chat ID has a linked phone number
+ */
+async function checkLink(req, res) {
+  const { chatId } = req.params;
+
+  if (!chatId) {
+    return res.status(400).json({
+      success: false,
+      code: 'MISSING_CHAT_ID',
+      message: 'Chat ID is required',
+    });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT phone FROM telegram_chat_ids WHERE chat_id = $1',
+      [chatId],
+    );
+
+    if (rows.length > 0) {
+      res.json({
+        success: true,
+        phone: rows[0].phone,
+      });
+    } else {
+      res.json({
+        success: false,
+        phone: null,
+      });
+    }
+  } catch (error) {
+    console.error('[Telegram] Check error:', error);
+    res.status(500).json({
+      success: false,
+      code: 'INTERNAL_ERROR',
+      message: 'Failed to check Telegram link',
+    });
+  }
+}
+
 module.exports = {
   linkTelegram,
+  checkLink,
 };
