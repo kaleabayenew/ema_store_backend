@@ -30,7 +30,7 @@ async function getAllProducts({
       pp.owner_name as partner_owner
     FROM products p
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
-    LEFT JOIN categories c ON p.category_id = c.id
+    LEFT JOIN categories c ON p.category = c.id
     LEFT JOIN partner_profile pp ON p.partner_id = pp.id
     WHERE p.is_visible = true
   `;
@@ -70,7 +70,7 @@ async function getAllProducts({
   return rows.map(row => ({
     id: row.id,
     partnerId: row.partner_id,
-    categoryId: row.category_id,
+    categoryId: row.category,
     brandId: row.brand_id,
     nameEn: row.name_en,
     nameAm: row.name_am,
@@ -111,7 +111,7 @@ async function getProductById(id) {
       pp.rating_avg as partner_rating,
       pp.rating_count as partner_review_count
      FROM products p
-     LEFT JOIN categories c ON p.category_id = c.id
+     LEFT JOIN categories c ON p.category = c.id
      LEFT JOIN partner_profile pp ON p.partner_id = pp.id
      WHERE p.id = $1`,
     [id],
@@ -165,7 +165,7 @@ async function createProduct(data) {
 
     const { rows } = await client.query(
       `INSERT INTO products
-       (partner_id, category_id, brand_id, name_en, description_en, delivery_info,
+       (partner_id, category, brand_id, name_en, description_en, delivery_info,
         price_cents, discount_cents, sku, stock, status, is_visible)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', true)
        RETURNING *`,
@@ -214,7 +214,7 @@ async function updateProduct(id, data) {
 
   const { rows } = await pool.query(
     `UPDATE products
-     SET category_id = COALESCE($1, category_id),
+     SET category = COALESCE($1, category),
          brand_id = COALESCE($2, brand_id),
          name_en = COALESCE($3, name_en),
          description_en = COALESCE($4, description_en),
