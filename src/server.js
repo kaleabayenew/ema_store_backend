@@ -124,18 +124,36 @@ Please share your phone number to link it:
 
 					if (data.success) {
 						pendingPhoneRequests.delete(chatId);
-						bot.sendMessage(chatId, `
+						
+						// Send a test OTP to verify the link works
+						const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
+						await bot.sendMessage(chatId, `
 ✅ *Phone Number Linked Successfully!*
 
 Your phone number: ${phone}
 
-You will receive verification codes here when you register or reset your password in the Ema Store app.
+We'll send a test code to verify everything is working...
 						`, { 
 							parse_mode: 'Markdown',
 							reply_markup: {
 								remove_keyboard: true
 							}
 						});
+
+						// Send test OTP after a short delay
+						setTimeout(async () => {
+							try {
+								await bot.sendMessage(chatId, `
+🔐 *Test Verification Code*
+
+Your test code is: *${testOtp}*
+
+This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
+								`, { parse_mode: 'Markdown' });
+							} catch (error) {
+								console.error('[Bot] Failed to send test OTP:', error);
+							}
+						}, 1000);
 					} else {
 						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 					}
@@ -199,18 +217,36 @@ Or click the button below to share your phone number automatically.
 
 						if (data.success) {
 							pendingPhoneRequests.delete(chatId);
-							bot.sendMessage(chatId, `
+							
+							// Send a test OTP to verify the link works
+							const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
+							await bot.sendMessage(chatId, `
 ✅ *Phone Number Linked Successfully!*
 
 Your phone number: ${phone}
 
-You will receive verification codes here when you register or reset your password in the Ema Store app.
+We'll send a test code to verify everything is working...
 							`, { 
 								parse_mode: 'Markdown',
 								reply_markup: {
 									remove_keyboard: true
 								}
 							});
+
+							// Send test OTP after a short delay
+							setTimeout(async () => {
+								try {
+									await bot.sendMessage(chatId, `
+🔐 *Test Verification Code*
+
+Your test code is: *${testOtp}*
+
+This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
+									`, { parse_mode: 'Markdown' });
+								} catch (error) {
+									console.error('[Bot] Failed to send test OTP:', error);
+								}
+							}, 1000);
 						} else {
 							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 						}
@@ -219,7 +255,12 @@ You will receive verification codes here when you register or reset your passwor
 						bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
 					}
 				} else {
-					// If not pending, show help
+					// If not pending, don't respond to random messages
+					// Only respond to commands
+					if (!text?.startsWith('/')) {
+						return;
+					}
+					
 					bot.sendMessage(chatId, `
 Please use the commands:
 - /start - Link your phone number
@@ -263,13 +304,30 @@ Include the country code (+251 for Ethiopia) and 9-12 digits.
 					const data = await response.json();
 
 					if (data.success) {
-						bot.sendMessage(chatId, `
+						// Send a test OTP to verify the link works
+						const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
+						await bot.sendMessage(chatId, `
 ✅ *Phone Number Linked Successfully!*
 
 Your phone number: ${phone}
 
-You will receive verification codes here when you register or reset your password in the Ema Store app.
+We'll send a test code to verify everything is working...
 						`, { parse_mode: 'Markdown' });
+
+						// Send test OTP after a short delay
+						setTimeout(async () => {
+							try {
+								await bot.sendMessage(chatId, `
+🔐 *Test Verification Code*
+
+Your test code is: *${testOtp}*
+
+This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
+								`, { parse_mode: 'Markdown' });
+							} catch (error) {
+								console.error('[Bot] Failed to send test OTP:', error);
+							}
+						}, 1000);
 					} else {
 						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
 					}
