@@ -34,6 +34,38 @@ async function migrate() {
       console.log('  (is_active column might already exist)');
     }
 
+    // Add balance column for wallet
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance DECIMAL(10, 2) DEFAULT 0.00`);
+      console.log('✓ Added balance column to users');
+    } catch (e) {
+      console.log('  (balance column might already exist)');
+    }
+
+    // Add coins column for rewards
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER DEFAULT 0`);
+      console.log('✓ Added coins column to users');
+    } catch (e) {
+      console.log('  (coins column might already exist)');
+    }
+
+    // Add referral_code column
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(20) UNIQUE`);
+      console.log('✓ Added referral_code column to users');
+    } catch (e) {
+      console.log('  (referral_code column might already exist)');
+    }
+
+    // Add referred_by column for tracking referrals
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by UUID REFERENCES users(id)`);
+      console.log('✓ Added referred_by column to users');
+    } catch (e) {
+      console.log('  (referred_by column might already exist)');
+    }
+
     // Create products table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
@@ -157,6 +189,57 @@ async function migrate() {
       );
     `);
     console.log('✓ FCM tokens table created');
+
+    // Create referral_codes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS referral_codes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        code VARCHAR(20) UNIQUE NOT NULL,
+        total_uses INTEGER DEFAULT 0,
+        max_uses INTEGER DEFAULT 100,
+        reward_coins INTEGER DEFAULT 50,
+        is_active BOOLEAN DEFAULT true,
+        expires_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Referral codes table created');
+
+    // Create partner_profile table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS partner_profile (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        owner_name VARCHAR(255),
+        business_name VARCHAR(255),
+        phone VARCHAR(20),
+        rating_avg DECIMAL(3, 2) DEFAULT 0,
+        rating_count INTEGER DEFAULT 0,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Partner profile table created');
+
+    // Create special_offers table (for flash deals)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS special_offers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        discount_percentage DECIMAL(5, 2) NOT NULL,
+        min_purchase DECIMAL(10, 2) DEFAULT 0,
+        max_discount DECIMAL(10, 2),
+        starts_at TIMESTAMP NOT NULL,
+        ends_at TIMESTAMP NOT NULL,
+        is_active BOOLEAN DEFAULT true,
+        product_ids UUID[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Special offers table created');
 
     console.log('\n✅ Neon database migration completed successfully!');
   } catch (error) {
