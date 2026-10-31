@@ -89,6 +89,14 @@ async function migrate() {
       console.log('  (password_plain column might already exist)');
     }
 
+    // Add profile_image column for profile picture URL
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT`);
+      console.log('✓ Added profile_image column to users');
+    } catch (e) {
+      console.log('  (profile_image column might already exist)');
+    }
+
     // Create brands table (before products)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS brands (
