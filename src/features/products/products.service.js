@@ -30,9 +30,9 @@ async function getAllProducts({
       pp.owner_name as partner_owner
     FROM products p
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
-    LEFT JOIN categories c ON p.category::text = c.id::text
-    LEFT JOIN partner_profile pp ON p.partner_id::text = pp.user_id::text
-    WHERE COALESCE(p.is_visible, true) = true
+    LEFT JOIN categories c ON p.category = c.id
+    LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
+    WHERE 1=1
   `;
 
   const params = [];
@@ -83,8 +83,8 @@ async function getAllProducts({
     discountCents: row.discount_cents,
     sku: row.sku,
     stock: row.stock,
-    status: row.status,
-    isVisible: row.is_visible,
+    status: row.status || 'APPROVED',
+    isVisible: row.is_visible !== false,
     ratingAvg: parseFloat(row.rating_avg) || 0,
     ratingCount: row.rating_count || 0,
     soldCount: row.sold_count || 0,
@@ -111,8 +111,8 @@ async function getProductById(id) {
       pp.rating_avg as partner_rating,
       pp.rating_count as partner_review_count
      FROM products p
-     LEFT JOIN categories c ON p.category::text = c.id::text
-     LEFT JOIN partner_profile pp ON p.partner_id::text = pp.user_id::text
+     LEFT JOIN categories c ON p.category = c.id
+     LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
      WHERE p.id = $1`,
     [id],
   );
