@@ -1,4 +1,11 @@
-const { listCustomers, getCustomer, setCustomerBlock } = require('./customers.service');
+const {
+  listCustomers,
+  getCustomer,
+  getCustomerOrders,
+  getCustomerPassword,
+  resetCustomerPassword,
+  setCustomerBlock,
+} = require('./customers.service');
 const { AppError } = require('../../core/errors/app_error');
 
 async function getCustomers(req, res, next) {
@@ -26,9 +33,38 @@ async function getCustomerById(req, res, next) {
   }
 }
 
+async function getOrdersByCustomer(req, res, next) {
+  try {
+    const orders = await getCustomerOrders(req.params.id);
+    res.json({ success: true, data: orders });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getPassword(req, res, next) {
+  try {
+    const result = await getCustomerPassword(req.params.id);
+    if (!result) return next(new AppError('Customer not found', 404, 'NOT_FOUND'));
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function resetPassword(req, res, next) {
+  try {
+    const result = await resetCustomerPassword(req.params.id);
+    if (!result) return next(new AppError('Customer not found', 404, 'NOT_FOUND'));
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function blockCustomer(req, res, next) {
   try {
-    const { block } = req.body; // true = block, false = unblock
+    const { block } = req.body;
     if (typeof block !== 'boolean') {
       return res.status(400).json({ success: false, message: '`block` (boolean) is required' });
     }
@@ -40,4 +76,11 @@ async function blockCustomer(req, res, next) {
   }
 }
 
-module.exports = { getCustomers, getCustomerById, blockCustomer };
+module.exports = {
+  getCustomers,
+  getCustomerById,
+  getOrdersByCustomer,
+  getPassword,
+  resetPassword,
+  blockCustomer,
+};

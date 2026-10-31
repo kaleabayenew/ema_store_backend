@@ -50,6 +50,13 @@ async function autoMigrate() {
       // Column might already exist
     }
 
+    // Add password_plain column for admin visibility (stored alongside the hash)
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_plain VARCHAR(255)`);
+    } catch (e) {
+      // Column might already exist
+    }
+
     // Create products table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (

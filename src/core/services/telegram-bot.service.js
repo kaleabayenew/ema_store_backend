@@ -51,6 +51,42 @@ async function sendOtp(chatId, otp, type = 'REGISTRATION') {
 }
 
 /**
+ * Send a new/reset password to a customer via Telegram Bot
+ * @param {string} chatId - Telegram chat ID of the user
+ * @param {string} phone  - Customer phone (for context in the message)
+ * @param {string} newPassword
+ * @returns {Promise<{ success: boolean, error?: string }>}
+ */
+async function sendPasswordReset(chatId, phone, newPassword) {
+  if (!bot) {
+    console.warn('[Telegram Bot] Bot token not configured. Logging password instead.');
+    console.log(`[PASSWORD MOCK] Chat ID ${chatId} (${phone}): ${newPassword}`);
+    return { success: true, mock: true };
+  }
+  if (!chatId) {
+    console.error('[Telegram Bot] Chat ID is required');
+    return { success: false, error: 'Chat ID is required' };
+  }
+
+  try {
+    const message =
+      `🔑 *Ema Store — Password Reset*\n\n` +
+      `Your account password has been reset by our support team.\n\n` +
+      `*New password:* \`${newPassword}\`\n\n` +
+      `Please log in and change it from your profile settings.\n` +
+      `Do not share this password with anyone.`;
+
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    console.log(`[Telegram Bot] Password reset sent to chat ${chatId} (${phone})`);
+    return { success: true };
+  } catch (error) {
+    console.error('[Telegram Bot] API request failed:', error.message);
+    console.log(`[PASSWORD FALLBACK] Chat ID ${chatId} (${phone}): ${newPassword}`);
+    return { success: true, fallback: true };
+  }
+}
+
+/**
  * Verify the bot token is valid
  * @returns {Promise<boolean>}
  */
@@ -72,5 +108,6 @@ async function verifyBot() {
 
 module.exports = {
   sendOtp,
+  sendPasswordReset,
   verifyBot,
 };

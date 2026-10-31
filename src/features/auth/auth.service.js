@@ -129,8 +129,8 @@ async function registerStep1({ phone, fullName, password, referralCode }) {
 
       // Pending activation — update details
       await client.query(
-        `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
-        [passwordHash, existing.id],
+        `UPDATE users SET password_hash = $1, password_plain = $2, updated_at = NOW() WHERE id = $3`,
+        [passwordHash, password, existing.id],
       );
       await client.query(
         `UPDATE customer_user SET full_name = $1, updated_at = NOW() WHERE user_id = $2`,
@@ -139,10 +139,10 @@ async function registerStep1({ phone, fullName, password, referralCode }) {
     } else {
       // Create fresh user in pending state
       const { rows: userRows } = await client.query(
-        `INSERT INTO users (phone, password_hash, role, is_active)
-         VALUES ($1, $2, 'CUSTOMER', false)
+        `INSERT INTO users (phone, password_hash, password_plain, role, is_active)
+         VALUES ($1, $2, $3, 'CUSTOMER', false)
          RETURNING id`,
-        [canonicalPhone, passwordHash],
+        [canonicalPhone, passwordHash, password],
       );
       const userId = userRows[0].id;
 
@@ -197,27 +197,30 @@ async function registerStep2({ phone, code, referralCode }) {
           [referralCode]
         );
 
-        if (referralRows.length > 0) {
-          const referral = referralRows[0];
-          
-          // Update user with referral
-          await client.query(
-            'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
-            [referral.user_id, referral.reward_coins, userId]
-          );
-
-          // Increment referral usage
-          await client.query(
-            'UPDATE referral_codes SET total_uses = total_uses + 1 WHERE id = $1',
-            [referral.id]
-          );
-
-          // Give coins to referrer
-          await client.query(
-            'UPDATE users SET coins = coins + $2 WHERE id = $1',
-            [referral.user_id, referral.reward_coins]
-          );
+        if (referralRows.length === 0) {
+          await client.query('ROLLBACK');
+          throw new AppError('Invalid or expired referral code. Please check and try again.', 400, 'INVALID_REFERRAL_CODE');
         }
+
+        const referral = referralRows[0];
+        
+        // Update user with referral
+        await client.query(
+          'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
+          [referral.user_id, referral.reward_coins, userId]
+        );
+
+        // Increment referral usage
+        await client.query(
+          'UPDATE referral_codes SET total_uses = total_uses + 1 WHERE id = $1',
+          [referral.id]
+        );
+
+        // Give coins to referrer
+        await client.query(
+          'UPDATE users SET coins = coins + $2 WHERE id = $1',
+          [referral.user_id, referral.reward_coins]
+        );
       }
     }
 
@@ -321,8 +324,8 @@ async function forgotPasswordStep2({ phone, code, newPassword }) {
 
   const passwordHash = await bcrypt.hash(newPassword, 12);
   await pool.query(
-    `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE phone = $2`,
-    [passwordHash, canonicalPhone],
+    `UPDATE users SET password_hash = $1, password_plain = $2, updated_at = NOW() WHERE phone = $3`,
+    [passwordHash, newPassword, canonicalPhone],
   );
 }
 
