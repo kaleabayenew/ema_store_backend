@@ -32,7 +32,7 @@ async function getAllProducts({
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
     LEFT JOIN categories c ON p.category::text = c.id::text
     LEFT JOIN partner_profile pp ON p.partner_id::text = pp.user_id::text
-    WHERE p.is_visible = true
+    WHERE COALESCE(p.is_visible, true) = true
   `;
 
   const params = [];
