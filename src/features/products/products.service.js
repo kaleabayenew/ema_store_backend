@@ -26,12 +26,12 @@ async function getAllProducts({
       pi.image_url as primary_image_url,
       c.name_en as category_name,
       c.slug as category_slug,
-      pp.shop_name as partner_name,
+      pp.business_name as partner_name,
       pp.owner_name as partner_owner
     FROM products p
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
     LEFT JOIN categories c ON p.category::text = c.id::text
-    LEFT JOIN partner_profile pp ON p.partner_id::text = pp.id::text
+    LEFT JOIN partner_profile pp ON p.partner_id::text = pp.user_id::text
     WHERE p.is_visible = true
   `;
 
@@ -106,13 +106,13 @@ async function getProductById(id) {
       p.*,
       c.name_en as category_name,
       c.slug as category_slug,
-      pp.shop_name as partner_name,
+      pp.business_name as partner_name,
       pp.owner_name as partner_owner,
       pp.rating_avg as partner_rating,
       pp.rating_count as partner_review_count
      FROM products p
      LEFT JOIN categories c ON p.category::text = c.id::text
-     LEFT JOIN partner_profile pp ON p.partner_id::text = pp.id::text
+     LEFT JOIN partner_profile pp ON p.partner_id::text = pp.user_id::text
      WHERE p.id = $1`,
     [id],
   );
@@ -180,7 +180,7 @@ async function createProduct(data) {
     // Add images
     for (let i = 0; i < images.length; i++) {
       await client.query(
-        `INSERT INTO product_images (product_id, url, is_primary, sort_order)
+        `INSERT INTO product_images (product_id, image_url, is_primary, sort_order)
          VALUES ($1, $2, $3, $4)`,
         [product.id, images[i].url, i === 0, i],
       );
