@@ -83,6 +83,56 @@ async function autoMigrate() {
       // Column might already exist
     }
 
+    // ── Ensure full products schema (additive, safe) ───────────────────────
+    // The service layer expects these columns. Add them if the table was
+    // created with an older minimal schema, and backfill from legacy columns.
+    const productColumns = [
+      `name_en VARCHAR(255)`,
+      `name_am VARCHAR(255)`,
+      `name_om VARCHAR(255)`,
+      `description_en TEXT`,
+      `description_am TEXT`,
+      `description_om TEXT`,
+      `delivery_info TEXT`,
+      `price_cents INTEGER DEFAULT 0`,
+      `discount_cents INTEGER DEFAULT 0`,
+      `sku VARCHAR(100)`,
+      `stock INTEGER DEFAULT 0`,
+      `status VARCHAR(50) DEFAULT 'PENDING'`,
+      `is_visible BOOLEAN DEFAULT true`,
+      `rating_avg DECIMAL(3, 2) DEFAULT 0`,
+      `rating_count INTEGER DEFAULT 0`,
+      `sold_count INTEGER DEFAULT 0`,
+      `brand_id UUID`,
+    ];
+    for (const colDef of productColumns) {
+      try {
+        await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ${colDef}`);
+      } catch (e) {
+        // column might already exist
+      }
+    }
+
+    // Make legacy NOT NULL columns safe so inserts via the new schema work
+    try {
+      await pool.query(`ALTER TABLE products ALTER COLUMN name DROP NOT NULL`);
+    } catch (e) {}
+    try {
+      await pool.query(`ALTER TABLE products ALTER COLUMN price DROP NOT NULL`);
+    } catch (e) {}
+
+    // Backfill new columns from legacy ones where available
+    try {
+      await pool.query(`UPDATE products SET name_en = COALESCE(name_en, name) WHERE name_en IS NULL AND name IS NOT NULL`);
+      await pool.query(`UPDATE products SET description_en = COALESCE(description_en, description) WHERE description_en IS NULL AND description IS NOT NULL`);
+      await pool.query(`UPDATE products SET price_cents = COALESCE(price_cents, CAST(price * 100 AS INTEGER)) WHERE price_cents IS NULL AND price IS NOT NULL`);
+      await pool.query(`UPDATE products SET stock = COALESCE(stock, stock_quantity) WHERE stock IS NULL AND stock_quantity IS NOT NULL`);
+      await pool.query(`UPDATE products SET is_visible = COALESCE(is_visible, is_active) WHERE is_visible IS NULL`);
+    } catch (e) {
+      // backfill best-effort
+    }
+    console.log('[Migration] ✓ Products table (full schema ensured)');
+
     // Create product_images table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS product_images (
@@ -244,6 +294,45 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ Telegram chat IDs table');
+
+    // Create partner_profile table (joined by products query)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS partner_profile (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        owner_name VARCHAR(255),
+        business_name VARCHAR(255),
+        shop_name VARCHAR(255),
+        phone VARCHAR(20),
+        email VARCHAR(255),
+        logo_url TEXT,
+        description TEXT,
+        address TEXT,
+        city VARCHAR(100),
+        rating_avg DECIMAL(3, 2) DEFAULT 0,
+        rating_count INTEGER DEFAULT 0,
+        total_orders INTEGER DEFAULT 0,
+        total_sales DECIMAL(12, 2) DEFAULT 0,
+        is_verified BOOLEAN DEFAULT false,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    // Ensure business_name exists even on older schemas that only had shop_name
+    try {
+      await pool.query(`ALTER TABLE partner_profile ADD COLUMN IF NOT EXISTS business_name VARCHAR(255)`);
+      await pool.query(`UPDATE partner_profile SET business_name = COALESCE(business_name, shop_name) WHERE business_name IS NULL AND shop_name IS NOT NULL`);
+    } catch (e) {}
+    console.log('[Migration] ✓ Partner profile table');
+
+    // Ensure categories has the full column set used by the products query
+    try {
+      await pool.query(`ALTER TABLE categories ADD COLUMN IF NOT EXISTS name_en VARCHAR(255)`);
+      await pool.query(`ALTER TABLE categories ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`);
+      await pool.query(`UPDATE categories SET name_en = COALESCE(name_en, name) WHERE name_en IS NULL AND name IS NOT NULL`);
+    } catch (e) {}
+    console.log('[Migration] ✓ Categories (full columns ensured)');
 
     console.log('[Migration] ✅ Auto-migration completed successfully!');
   } catch (error) {
