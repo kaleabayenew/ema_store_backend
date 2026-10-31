@@ -321,7 +321,26 @@ async function autoMigrate() {
     `);
     // Ensure business_name exists even on older schemas that only had shop_name
     try {
-      await pool.query(`ALTER TABLE partner_profile ADD COLUMN IF NOT EXISTS business_name VARCHAR(255)`);
+      const partnerCols = [
+        `business_name VARCHAR(255)`,
+        `shop_name VARCHAR(255)`,
+        `owner_name VARCHAR(255)`,
+        `city VARCHAR(100)`,
+        `address TEXT`,
+        `phone VARCHAR(20)`,
+        `email VARCHAR(255)`,
+        `logo_url TEXT`,
+        `description TEXT`,
+        `rating_avg DECIMAL(3, 2) DEFAULT 0`,
+        `rating_count INTEGER DEFAULT 0`,
+        `total_orders INTEGER DEFAULT 0`,
+        `total_sales DECIMAL(12, 2) DEFAULT 0`,
+        `is_verified BOOLEAN DEFAULT false`,
+        `is_active BOOLEAN DEFAULT true`,
+      ];
+      for (const colDef of partnerCols) {
+        await pool.query(`ALTER TABLE partner_profile ADD COLUMN IF NOT EXISTS ${colDef}`);
+      }
       await pool.query(`UPDATE partner_profile SET business_name = COALESCE(business_name, shop_name) WHERE business_name IS NULL AND shop_name IS NOT NULL`);
     } catch (e) {}
     console.log('[Migration] ✓ Partner profile table');
