@@ -1,6 +1,6 @@
-﻿const { Router } = require('express');
+const { Router } = require('express');
 const ctrl = require('./auth.controller');
-const authMiddleware = require('../../core/middleware/auth');
+const { requireAuth } = require('../../core/middleware/auth');
 
 const router = Router();
 
@@ -19,6 +19,6 @@ router.post('/forgot-password/reset', ctrl.resetPassword);
 router.post('/resend-otp', ctrl.resendOtp);
 
 // Profile image update (requires authentication)
-router.put('/profile-image', authMiddleware, ctrl.updateProfileImage);
+router.put('/profile-image', requireAuth, ctrl.updateProfileImage);
 
 module.exports = router;
