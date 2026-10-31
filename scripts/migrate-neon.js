@@ -8,6 +8,21 @@ async function migrate() {
   console.log('Starting Neon database migration...');
 
   try {
+    // Drop tables to recreate with correct schema
+    console.log('Dropping existing tables...');
+    await pool.query('DROP TABLE IF EXISTS seller_offers CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_specifications CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_variants CASCADE');
+    await pool.query('DROP TABLE IF EXISTS wishlist CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_viewers CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_reactions CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_reviews CASCADE');
+    await pool.query('DROP TABLE IF EXISTS brands CASCADE');
+    await pool.query('DROP TABLE IF EXISTS categories CASCADE');
+    await pool.query('DROP TABLE IF EXISTS products CASCADE');
+    await pool.query('DROP TABLE IF EXISTS product_images CASCADE');
+    console.log('✓ Tables dropped');
+
     // Create users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -66,19 +81,72 @@ async function migrate() {
       console.log('  (referred_by column might already exist)');
     }
 
+    // Add password_plain column
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_plain VARCHAR(255)`);
+      console.log('✓ Added password_plain column to users');
+    } catch (e) {
+      console.log('  (password_plain column might already exist)');
+    }
+
+    // Create brands table (before products)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS brands (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        logo_url TEXT,
+        description TEXT,
+        website_url TEXT,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Brands table created');
+
+    // Create categories table (before products)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS categories (
+        id VARCHAR(50) PRIMARY KEY,
+        name_en VARCHAR(255) NOT NULL,
+        name_am VARCHAR(255),
+        name_om VARCHAR(255),
+        slug VARCHAR(255) UNIQUE NOT NULL,
+        description TEXT,
+        icon VARCHAR(255),
+        color VARCHAR(7),
+        parent_id VARCHAR(50) REFERENCES categories(id),
+        order_index INTEGER DEFAULT 0,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Categories table created');
+
     // Create products table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         partner_id UUID REFERENCES users(id),
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        category VARCHAR(100),
-        price DECIMAL(10, 2) NOT NULL,
-        old_price DECIMAL(10, 2),
-        stock_quantity INTEGER DEFAULT 0,
-        image_url TEXT,
-        is_active BOOLEAN DEFAULT true,
+        category VARCHAR(50),
+        brand_id UUID REFERENCES brands(id),
+        name_en VARCHAR(255) NOT NULL,
+        name_am VARCHAR(255),
+        name_om VARCHAR(255),
+        description_en TEXT,
+        description_am TEXT,
+        description_om TEXT,
+        delivery_info TEXT,
+        price_cents INTEGER NOT NULL,
+        discount_cents INTEGER DEFAULT 0,
+        sku VARCHAR(100),
+        stock INTEGER DEFAULT 0,
+        status VARCHAR(50) DEFAULT 'PENDING',
+        is_visible BOOLEAN DEFAULT true,
+        rating_avg DECIMAL(3, 2) DEFAULT 0,
+        rating_count INTEGER DEFAULT 0,
+        sold_count INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -100,6 +168,7 @@ async function migrate() {
         product_id UUID REFERENCES products(id) ON DELETE CASCADE,
         image_url TEXT NOT NULL,
         is_primary BOOLEAN DEFAULT false,
+        sort_order INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -214,8 +283,16 @@ async function migrate() {
         owner_name VARCHAR(255),
         business_name VARCHAR(255),
         phone VARCHAR(20),
+        email VARCHAR(255),
+        logo_url TEXT,
+        description TEXT,
+        address TEXT,
+        city VARCHAR(100),
         rating_avg DECIMAL(3, 2) DEFAULT 0,
         rating_count INTEGER DEFAULT 0,
+        total_orders INTEGER DEFAULT 0,
+        total_sales DECIMAL(12, 2) DEFAULT 0,
+        is_verified BOOLEAN DEFAULT false,
         is_active BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -240,6 +317,110 @@ async function migrate() {
       );
     `);
     console.log('✓ Special offers table created');
+
+    // Create product_reviews table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        customer_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+        comment TEXT,
+        helpful_count INTEGER DEFAULT 0,
+        is_approved BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(product_id, customer_id)
+      );
+    `);
+    console.log('✓ Product reviews table created');
+
+    // Create product_reactions table (like/dislike)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_reactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reaction_type VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like', 'dislike')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(product_id, user_id)
+      );
+    `);
+    console.log('✓ Product reactions table created');
+
+    // Create product_viewers table (real-time viewers)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_viewers (
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        viewer_count INTEGER DEFAULT 0,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (product_id)
+      );
+    `);
+    console.log('✓ Product viewers table created');
+
+    // Create wishlist table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wishlist (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, product_id)
+      );
+    `);
+    console.log('✓ Wishlist table created');
+
+    // Create product_variants table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_variants (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        sku VARCHAR(100),
+        price_cents INTEGER,
+        stock INTEGER DEFAULT 0,
+        attributes JSONB,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Product variants table created');
+
+    // Create product_specifications table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_specifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        spec_key VARCHAR(255) NOT NULL,
+        spec_value TEXT NOT NULL,
+        display_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Product specifications table created');
+
+    // Create seller_offers table (other sellers for same product)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS seller_offers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        seller_id UUID NOT NULL REFERENCES users(id),
+        seller_name VARCHAR(255) NOT NULL,
+        price DECIMAL(10, 2) NOT NULL,
+        rating DECIMAL(3, 2) DEFAULT 0,
+        review_count INTEGER DEFAULT 0,
+        badge VARCHAR(50),
+        badge_color VARCHAR(7),
+        delivery_info TEXT,
+        is_cheapest BOOLEAN DEFAULT false,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Seller offers table created');
 
     console.log('\n✅ Neon database migration completed successfully!');
   } catch (error) {
