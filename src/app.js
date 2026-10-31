@@ -265,6 +265,7 @@ const uploadRouter = require('./features/upload/upload.router');
 const telegramRouter = require('./features/telegram/telegram.routes');
 const referralRouter = require('./features/referral/referral.routes');
 const specialOffersRouter = require('./features/special-offers/special-offers.router');
+const customersRouter     = require('./features/customers/customers.router');
 
 const app = express();
 
@@ -321,6 +322,7 @@ app.use('/api/v1/upload', uploadRouter);
 app.use('/api/v1/telegram', telegramRouter);
 app.use('/api/v1/referral', referralRouter);
 app.use('/api/v1/special-offers', specialOffersRouter);
+app.use('/api/v1/customers',     customersRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
