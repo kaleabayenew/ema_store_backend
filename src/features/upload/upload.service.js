@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { uploadToStorage, getPresignedUrl, deleteFromStorage } = require('../../core/config/storage');
 
 class UploadService {
   constructor() {
@@ -26,17 +27,31 @@ class UploadService {
       const fileExtension = path.extname(file.originalname || file.name);
       const fileName = `${uuidv4()}${fileExtension}`;
       const filePath = path.join(targetDir, fileName);
+      const storageKey = `${folder}/${fileName}`;
 
-      // Write file
+      // Write file to local disk (backup)
       const buffer = file.buffer || file.data;
       fs.writeFileSync(filePath, buffer);
 
-      // Return public URL
-      const publicUrl = `/uploads/${folder}/${fileName}`;
+      // Upload to Neon Object Storage
+      let cloudUrl = null;
+      try {
+        cloudUrl = await uploadToStorage(buffer, storageKey, file.mimetype || 'image/jpeg');
+        
+        // Delete local file after successful cloud upload
+        fs.unlinkSync(filePath);
+        console.log(`[Upload] Local file deleted: ${filePath}`);
+      } catch (cloudError) {
+        console.error('[Upload] Cloud upload failed, keeping local file:', cloudError);
+        // Return local URL as fallback
+        cloudUrl = `/uploads/${folder}/${fileName}`;
+      }
+
       return {
-        url: publicUrl,
+        url: cloudUrl,
         fileName,
         size: buffer.length,
+        storageKey,
       };
     } catch (error) {
       console.error('Upload error:', error);
@@ -44,12 +59,30 @@ class UploadService {
     }
   }
 
+  async getPresignedUrl(storageKey, expiresIn = 3600) {
+    try {
+      return await getPresignedUrl(storageKey, expiresIn);
+    } catch (error) {
+      console.error('Presigned URL error:', error);
+      throw new Error('Failed to generate presigned URL');
+    }
+  }
+
   async deleteFile(url) {
     try {
+      // Try to extract storage key from URL
+      const urlParts = url.split('/');
+      const storageKey = urlParts.slice(-2).join('/');
+      
+      // Delete from cloud storage
+      await deleteFromStorage(storageKey);
+      
+      // Delete from local disk if exists
       const filePath = path.join(process.cwd(), 'public', url);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
+      
       return true;
     } catch (error) {
       console.error('Delete error:', error);

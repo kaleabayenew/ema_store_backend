@@ -247,7 +247,7 @@ async function login({ phone, email, password }) {
   // Determine query based on whether phone or email is provided
   let query, param;
   if (canonicalPhone) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins, u.profile_image,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -255,7 +255,7 @@ async function login({ phone, email, password }) {
              WHERE u.phone = $1`;
     param = canonicalPhone;
   } else if (normalizedEmail) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins, u.profile_image,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -334,7 +334,7 @@ async function forgotPasswordStep2({ phone, code, newPassword }) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function _buildAuthResponse(canonicalPhone) {
   const { rows } = await pool.query(
-    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, cp.full_name, au.admin_role
+    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, u.profile_image, cp.full_name, au.admin_role
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
      LEFT JOIN admin_user au ON au.user_id = u.id
@@ -356,8 +356,19 @@ async function _buildAuthResponse(canonicalPhone) {
       adminRole: user.adminRole,
       balance: parseFloat(user.balance) || 0,
       coins: user.coins || 0,
+      profileImage: user.profile_image,
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Update profile image
+// ─────────────────────────────────────────────────────────────────────────────
+async function updateProfileImage(userId, profileImageUrl) {
+  await pool.query(
+    `UPDATE users SET profile_image = $1, updated_at = NOW() WHERE id = $2`,
+    [profileImageUrl, userId]
+  );
 }
 
 module.exports = {
@@ -369,4 +380,5 @@ module.exports = {
   login,
   forgotPasswordStep1,
   forgotPasswordStep2,
+  updateProfileImage,
 };

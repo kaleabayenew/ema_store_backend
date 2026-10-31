@@ -27,4 +27,8 @@ module.exports = Object.freeze({
   jwtSecret:      process.env.JWT_SECRET || 'changeme',
   jwtExpiresIn:   process.env.JWT_EXPIRES_IN || '7d',
   allowedOrigins,
+  // Neon Object Storage
+  storageEndpoint: process.env.NEON_OBJECT_STORAGE_ENDPOINT,
+  storageBucket:   process.env.NEON_OBJECT_STORAGE_BUCKET || 'ema-store-images',
+  storageRegion:   process.env.NEON_OBJECT_STORAGE_REGION || 'us-east-1',
 });

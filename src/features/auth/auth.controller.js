@@ -127,6 +127,27 @@ const resendOtp = async (req, res, next) => {
   }
 };
 
+// ── PUT /api/v1/auth/profile-image ────────────────────────────────────────
+// Body: { profileImage }
+// → Updates user profile image URL
+const updateProfileImage = async (req, res, next) => {
+  try {
+    const userId = req.user?.id;
+    const { profileImage } = req.body;
+
+    if (!userId)
+      return error(res, 'Authentication required.', 401, 'UNAUTHORIZED');
+    if (!profileImage)
+      return error(res, 'profileImage is required.', 400, 'MISSING_FIELDS');
+
+    await service.updateProfileImage(userId, profileImage);
+
+    ok(res, { message: 'Profile image updated successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   register,
   registerVerify,
@@ -134,4 +155,5 @@ module.exports = {
   forgotPassword,
   resetPassword,
   resendOtp,
+  updateProfileImage,
 };

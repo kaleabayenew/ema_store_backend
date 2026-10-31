@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { uploadFile } = require('./upload.controller');
+const { uploadFile, getPresignedUrl } = require('./upload.controller');
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -23,5 +23,8 @@ const router = express.Router();
 
 // File upload endpoint with multer middleware
 router.post('/', upload.single('file'), uploadFile);
+
+// Generate presigned URL for existing file
+router.get('/presigned/:storageKey', getPresignedUrl);
 
 module.exports = router;
