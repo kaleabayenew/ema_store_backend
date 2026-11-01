@@ -20,7 +20,111 @@ async function getAllProducts({
   limit = 20,
   offset = 0,
 } = {}) {
-  let query = `
+  const fromAndWhere = `
+    FROM products p
+    LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+    LEFT JOIN categories c ON p.category = c.id
+    LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
+    WHERE 1=1
+  `;
+
+  const params = [];
+  let paramIndex = 1;
+  let where = '';
+
+  if (category) {
+    where += ` AND c.slug = $${paramIndex}`;
+    params.push(category);
+    paramIndex++;
+  }
+
+  if (search) {
+    where += ` AND (p.name_en ILIKE $${paramIndex} OR p.description_en ILIKE $${paramIndex})`;
+    params.push(`%${search}%`);
+    paramIndex++;
+  }
+
+  if (status) {
+    where += ` AND p.status = $${paramIndex}`;
+    params.push(status);
+    paramIndex++;
+  }
+
+  if (partnerId) {
+    where += ` AND p.partner_id = $${paramIndex}`;
+    params.push(partnerId);
+    paramIndex++;
+  }
+
+  // Total count + aggregates (without limit/offset)
+  const aggRes = await pool.query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE p.status = 'APPROVED')::int AS approved,
+       COUNT(*) FILTER (WHERE p.status = 'PENDING')::int  AS pending,
+       COALESCE(AVG(p.rating_avg), 0)::float AS avg_rating
+     ${fromAndWhere} ${where}`,
+    params,
+  );
+  const total    = aggRes.rows[0]?.total ?? 0;
+  const approved = aggRes.rows[0]?.approved ?? 0;
+  const pending  = aggRes.rows[0]?.pending ?? 0;
+  const avgRating = parseFloat(aggRes.rows[0]?.avg_rating ?? 0) || 0;
+
+  // Page query
+  const pageParams = [...params, limit, offset];
+  const query = `
+    SELECT
+      p.*,
+      pi.image_url as primary_image_url,
+      c.name_en as category_name,
+      c.slug as category_slug,
+      pp.business_name as partner_name,
+      pp.owner_name as partner_owner
+    ${fromAndWhere} ${where}
+    ORDER BY p.created_at DESC
+    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+  `;
+
+  const { rows } = await pool.query(query, pageParams);
+
+  const products = rows.map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    categoryId: row.category,
+    brandId: row.brand_id,
+    nameEn: row.name_en,
+    nameAm: row.name_am,
+    nameOm: row.name_om,
+    descriptionEn: row.description_en,
+    descriptionAm: row.description_am,
+    descriptionOm: row.description_om,
+    deliveryInfo: row.delivery_info,
+    priceCents: row.price_cents,
+    discountCents: row.discount_cents,
+    sku: row.sku,
+    stock: row.stock,
+    status: row.status || 'APPROVED',
+    isVisible: row.is_visible !== false,
+    ratingAvg: parseFloat(row.rating_avg) || 0,
+    ratingCount: row.rating_count || 0,
+    soldCount: row.sold_count || 0,
+    primaryImageUrl: row.primary_image_url,
+    categoryName: row.category_name,
+    categorySlug: row.category_slug,
+    partnerName: row.partner_name,
+    partnerOwner: row.partner_owner,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+
+  return { products, total, approved, pending, avgRating };
+}
+
+// ── Get New Arrivals (products sorted by creation date) ─────────────────────
+
+async function getNewArrivals({ limit = 5 } = {}) {
+  const query = `
     SELECT
       p.*,
       pi.image_url as primary_image_url,
@@ -32,40 +136,120 @@ async function getAllProducts({
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
     LEFT JOIN categories c ON p.category = c.id
     LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
-    WHERE 1=1
+    WHERE p.is_visible = true
+    ORDER BY p.created_at DESC
+    LIMIT $1
   `;
 
-  const params = [];
-  let paramIndex = 1;
+  const { rows } = await pool.query(query, [limit]);
 
-  if (category) {
-    query += ` AND c.slug = $${paramIndex}`;
-    params.push(category);
-    paramIndex++;
-  }
+  return rows.map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    categoryId: row.category,
+    brandId: row.brand_id,
+    nameEn: row.name_en,
+    nameAm: row.name_am,
+    nameOm: row.name_om,
+    descriptionEn: row.description_en,
+    descriptionAm: row.description_am,
+    descriptionOm: row.description_om,
+    deliveryInfo: row.delivery_info,
+    priceCents: row.price_cents,
+    discountCents: row.discount_cents,
+    sku: row.sku,
+    stock: row.stock,
+    status: row.status || 'APPROVED',
+    isVisible: row.is_visible !== false,
+    ratingAvg: parseFloat(row.rating_avg) || 0,
+    ratingCount: row.rating_count || 0,
+    soldCount: row.sold_count || 0,
+    primaryImageUrl: row.primary_image_url,
+    categoryName: row.category_name,
+    categorySlug: row.category_slug,
+    partnerName: row.partner_name,
+    partnerOwner: row.partner_owner,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
 
-  if (search) {
-    query += ` AND (p.name_en ILIKE $${paramIndex} OR p.description_en ILIKE $${paramIndex})`;
-    params.push(`%${search}%`);
-    paramIndex++;
-  }
+// ── Get Flash Deal Products (products with discounts) ─────────────────────
 
-  if (status) {
-    query += ` AND p.status = $${paramIndex}`;
-    params.push(status);
-    paramIndex++;
-  }
+async function getFlashDealProducts({ limit = 10 } = {}) {
+  const query = `
+    SELECT
+      p.*,
+      pi.image_url as primary_image_url,
+      c.name_en as category_name,
+      c.slug as category_slug,
+      pp.business_name as partner_name,
+      pp.owner_name as partner_owner
+    FROM products p
+    LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+    LEFT JOIN categories c ON p.category = c.id
+    LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
+    WHERE p.is_visible = true
+      AND p.discount_cents > 0
+      AND p.discount_cents < p.price_cents
+    ORDER BY p.discount_cents DESC
+    LIMIT $1
+  `;
 
-  if (partnerId) {
-    query += ` AND p.partner_id = $${paramIndex}`;
-    params.push(partnerId);
-    paramIndex++;
-  }
+  const { rows } = await pool.query(query, [limit]);
 
-  query += ` ORDER BY p.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-  params.push(limit, offset);
+  return rows.map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    categoryId: row.category,
+    brandId: row.brand_id,
+    nameEn: row.name_en,
+    nameAm: row.name_am,
+    nameOm: row.name_om,
+    descriptionEn: row.description_en,
+    descriptionAm: row.description_am,
+    descriptionOm: row.description_om,
+    deliveryInfo: row.delivery_info,
+    priceCents: row.price_cents,
+    discountCents: row.discount_cents,
+    sku: row.sku,
+    stock: row.stock,
+    status: row.status || 'APPROVED',
+    isVisible: row.is_visible !== false,
+    ratingAvg: parseFloat(row.rating_avg) || 0,
+    ratingCount: row.rating_count || 0,
+    soldCount: row.sold_count || 0,
+    primaryImageUrl: row.primary_image_url,
+    categoryName: row.category_name,
+    categorySlug: row.category_slug,
+    partnerName: row.partner_name,
+    partnerOwner: row.partner_owner,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
 
-  const { rows } = await pool.query(query, params);
+// ── Get Popular Products (sorted by rating and sales) ─────────────────────
+
+async function getPopularProducts({ limit = 10 } = {}) {
+  const query = `
+    SELECT
+      p.*,
+      pi.image_url as primary_image_url,
+      c.name_en as category_name,
+      c.slug as category_slug,
+      pp.business_name as partner_name,
+      pp.owner_name as partner_owner
+    FROM products p
+    LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+    LEFT JOIN categories c ON p.category = c.id
+    LEFT JOIN partner_profile pp ON p.partner_id = pp.user_id
+    WHERE p.is_visible = true
+    ORDER BY p.rating_avg DESC, p.sold_count DESC
+    LIMIT $1
+  `;
+
+  const { rows } = await pool.query(query, [limit]);
 
   return rows.map(row => ({
     id: row.id,

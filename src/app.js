@@ -382,6 +382,9 @@ const referralRouter = require('./features/referral/referral.routes');
 const specialOffersRouter = require('./features/special-offers/special-offers.router');
 const customersRouter     = require('./features/customers/customers.router');
 const adminPartnersRouter = require('./features/admin/partners.router');
+const bannersRouter = require('./features/banners/banners.router');
+const cartRouter = require('./features/cart/cart.router');
+const ordersRouter = require('./features/orders/orders.router');
 
 const app = express();
 
@@ -440,6 +443,9 @@ app.use('/api/v1/referral', referralRouter);
 app.use('/api/v1/special-offers', specialOffersRouter);
 app.use('/api/v1/customers',     customersRouter);
 app.use('/api/v1/admin', adminPartnersRouter);
+app.use('/api/v1/banners', bannersRouter);
+app.use('/api/v1/cart', cartRouter);
+app.use('/api/v1/orders', ordersRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {

@@ -2,22 +2,35 @@
 const { ok, created, error } = require('../../core/utils/response');
 
 // ── GET /api/v1/products
-// Query: ?category=&search=&status=&partnerId=&limit=&offset=
-// Get all products with filters
+// Query: ?category=&search=&status=&partnerId=&limit=&page=
+// Get all products with filters + pagination
 const getAllProducts = async (req, res, next) => {
   try {
-    const { category, search, status, partnerId, limit, offset } = req.query;
+    const { category, search, status, partnerId } = req.query;
+    const limit = parseInt(req.query.limit) || 15;
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const offset = (page - 1) * limit;
 
-    const products = await service.getAllProducts({
+    const { products, total, approved, pending, avgRating } = await service.getAllProducts({
       category,
       search,
       status,
       partnerId,
-      limit: parseInt(limit) || 20,
-      offset: parseInt(offset) || 0,
+      limit,
+      offset,
     });
 
-    ok(res, { products, count: products.length });
+    ok(res, {
+      products,
+      count: products.length,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      approved,
+      pending,
+      avgRating: parseFloat(avgRating.toFixed(1)),
+    });
   } catch (err) {
     next(err);
   }
@@ -111,6 +124,57 @@ const getProductReviews = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/products/new-arrivals
+// Query: ?limit=
+// Get newest products
+const getNewArrivals = async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+
+    const products = await service.getNewArrivals({
+      limit: parseInt(limit) || 5,
+    });
+
+    ok(res, { products, count: products.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/products/flash-deals
+// Query: ?limit=
+// Get products with discounts (flash deals)
+const getFlashDealProducts = async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+
+    const products = await service.getFlashDealProducts({
+      limit: parseInt(limit) || 10,
+    });
+
+    ok(res, { products, count: products.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/products/popular
+// Query: ?limit=
+// Get popular products (sorted by rating and sales)
+const getPopularProducts = async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+
+    const products = await service.getPopularProducts({
+      limit: parseInt(limit) || 10,
+    });
+
+    ok(res, { products, count: products.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAllProducts,
   getProductById,
@@ -119,4 +183,7 @@ module.exports = {
   deleteProduct,
   getAllCategories,
   getProductReviews,
+  getNewArrivals,
+  getFlashDealProducts,
+  getPopularProducts,
 };
