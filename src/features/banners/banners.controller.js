@@ -1,9 +1,5 @@
 const { ok, created, error } = require('../../core/utils/response');
-const { Pool } = require('../../core/config/database');
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+const { pool } = require('../../core/config/database');
 
 // GET /api/v1/banners/payment - Get active payment banner
 const getPaymentBanner = async (req, res, next) => {
