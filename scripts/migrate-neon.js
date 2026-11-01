@@ -326,6 +326,23 @@ async function migrate() {
     `);
     console.log('✓ Special offers table created');
 
+    // Create payment_banners table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS payment_banners (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        image_url TEXT,
+        valid_from TIMESTAMP,
+        valid_until TIMESTAMP,
+        redirect_url TEXT,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ Payment banners table created');
+
     // Create product_reviews table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS product_reviews (
@@ -408,6 +425,21 @@ async function migrate() {
       );
     `);
     console.log('✓ Product specifications table created');
+
+    // Create cart_items table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cart_items (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        price_at_add DECIMAL(10, 2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, product_id)
+      );
+    `);
+    console.log('✓ Cart items table created');
 
     // Create seller_offers table (other sellers for same product)
     await pool.query(`
