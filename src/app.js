@@ -443,6 +443,11 @@ async function autoMigrate() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    // Add allowed_pages + last_login for the Manage Users admin feature
+    try {
+      await pool.query(`ALTER TABLE admin_user ADD COLUMN IF NOT EXISTS allowed_pages JSONB DEFAULT '[]'::jsonb`);
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP WITH TIME ZONE`);
+    } catch (e) { /* columns may already exist */ }
     console.log('[Migration] ✓ Admin user table');
 
     // Create telegram_chat_ids table
@@ -558,6 +563,17 @@ async function autoMigrate() {
       );
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_messages_ticket_id ON support_messages(ticket_id)`);
+    // Read receipts + typing indicator
+    await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS support_typing (
+        ticket_id UUID NOT NULL,
+        user_id   UUID,
+        is_staff  BOOLEAN NOT NULL,
+        typed_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (ticket_id, user_id)
+      )
+    `);
     console.log('[Migration] ✓ Support messages table');
 
     // Create bids table
@@ -747,6 +763,165 @@ async function autoMigrate() {
     console.log('[Migration] ✓ Bid entries table');
 
     console.log('[Migration] ✅ Auto-migration completed successfully!');
+
+    // Create support_settings table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS support_settings (
+          id VARCHAR(50) PRIMARY KEY DEFAULT 'default',
+          welcome_message TEXT NOT NULL DEFAULT 'Hello! 👋 Welcome to Ema Store customer support. How can we help you today?',
+          is_auto_reply_enabled BOOLEAN DEFAULT true,
+          quick_starters JSONB DEFAULT '["Track my order", "Payment issue", "Return item", "Speak to agent"]'::jsonb,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        INSERT INTO support_settings (id) VALUES ('default')
+        ON CONFLICT (id) DO NOTHING
+      `);
+      console.log('[Migration] ✓ Support settings table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Support settings table already exists or error:', e.message);
+    }
+
+    // Create support_default_messages table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS support_default_messages (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          title      VARCHAR(100) NOT NULL,
+          body       TEXT         NOT NULL,
+          sort_order INT          NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      // Drop legacy icon column if it exists (idempotent)
+      await pool.query(`ALTER TABLE support_default_messages DROP COLUMN IF EXISTS icon`);
+      console.log('[Migration] ✓ Support default messages table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Support default messages table:', e.message);
+    }
+
+    // Create coupons table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS coupons (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          code VARCHAR(50) UNIQUE NOT NULL,
+          discount_type VARCHAR(20) NOT NULL DEFAULT 'PERCENT',
+          discount_value NUMERIC(10, 2) NOT NULL,
+          min_order_cents INTEGER DEFAULT 0,
+          max_discount_cents INTEGER DEFAULT 0,
+          expires_at TIMESTAMP WITH TIME ZONE,
+          usage_limit INTEGER DEFAULT 1000,
+          used_count INTEGER DEFAULT 0,
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      console.log('[Migration] ✓ Coupons table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Coupons table:', e.message);
+    }
+
+    // Create wheel_slices table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS wheel_slices (
+          id SERIAL PRIMARY KEY,
+          slice_index INTEGER NOT NULL,
+          label VARCHAR(100) NOT NULL,
+          reward_type VARCHAR(50) NOT NULL,
+          reward_value NUMERIC(10, 2) DEFAULT 0,
+          coupon_id UUID REFERENCES coupons(id) ON DELETE SET NULL,
+          probability_weight INTEGER NOT NULL DEFAULT 10,
+          color_hex VARCHAR(20) NOT NULL DEFAULT '#0F6841',
+          is_active BOOLEAN DEFAULT true
+        )
+      `);
+      console.log('[Migration] ✓ Wheel slices table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Wheel slices table:', e.message);
+    }
+
+    // Create user_coupons table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_coupons (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+          coupon_id UUID REFERENCES coupons(id) ON DELETE CASCADE,
+          is_used BOOLEAN DEFAULT false,
+          used_at TIMESTAMP WITH TIME ZONE,
+          claimed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      console.log('[Migration] ✓ User coupons table');
+    } catch (e) {
+      console.log('[Migration] ⚠ User coupons table:', e.message);
+    }
+
+    // Create user_spins table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_spins (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+          spins_today INTEGER DEFAULT 0,
+          last_spin_date DATE DEFAULT CURRENT_DATE
+        )
+      `);
+      console.log('[Migration] ✓ User spins table');
+    } catch (e) {
+      console.log('[Migration] ⚠ User spins table:', e.message);
+    }
+
+    // Seed default wheel slices if empty
+    try {
+      const { rows: sliceCount } = await pool.query('SELECT COUNT(*) FROM wheel_slices');
+      if (parseInt(sliceCount[0].count, 10) === 0) {
+        await pool.query(`
+          INSERT INTO wheel_slices (slice_index, label, reward_type, reward_value, probability_weight, color_hex) VALUES
+          (0, '10% OFF', 'COUPON', 10, 25, '#0F6841'),
+          (1, '50 Birr', 'COUPON', 50, 20, '#F1C967'),
+          (2, 'Free Delivery', 'COUPON', 0, 15, '#1E293B'),
+          (3, 'Try Again', 'NONE', 0, 25, '#94A3B8'),
+          (4, '20% OFF', 'COUPON', 20, 10, '#E11D48'),
+          (5, '100 Birr', 'COUPON', 100, 5, '#8B5CF6'),
+          (6, '5% OFF', 'COUPON', 5, 30, '#0284C7'),
+          (7, '20 Coins', 'COINS', 20, 15, '#D97706')
+        `);
+        console.log('[Migration] ✓ Wheel slices seeded');
+      }
+    } catch (e) {
+      console.log('[Migration] ⚠ Wheel slices seeding:', e.message);
+    }
+
+    // Create about_content table
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS about_content (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          title VARCHAR(255) NOT NULL,
+          description TEXT,
+          mission TEXT,
+          vision TEXT,
+          values TEXT,
+          story TEXT,
+          image_url TEXT,
+          contact_email VARCHAR(255),
+          contact_phone VARCHAR(50),
+          social_links JSONB,
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log('[Migration] ✓ About content table');
+    } catch (e) {
+      console.log('[Migration] ⚠ About content table:', e.message);
+    }
   } catch (error) {
     console.error('[Migration] ❌ Auto-migration failed:', error.message);
     // Don't exit - let the server start anyway
@@ -775,6 +950,7 @@ const referralRouter = require('./features/referral/referral.routes');
 const specialOffersRouter = require('./features/special-offers/special-offers.router');
 const customersRouter = require('./features/customers/customers.router');
 const adminPartnersRouter = require('./features/admin/partners.router');
+const adminUsersRouter = require('./features/users/users.router');
 const bidsRouter = require('./features/bids/bids.router');
 const supportRouter = require('./features/support/support.router');
 const bannersRouter = require('./features/banners/banners.router');
@@ -786,6 +962,8 @@ const auctionsRouter = require('./features/auctions/auctions.router');
 const wishlistRouter = require('./features/wishlist/wishlist.router');
 const reviewsRouter = require('./features/reviews/reviews.router');
 const recentlyViewedRouter = require('./features/recently-viewed/recently_viewed.router');
+const marketingRouter = require('./features/marketing/marketing.router');
+const aboutRouter = require('./features/about/about.router');
 
 const app = express();
 
@@ -835,6 +1013,7 @@ app.use('/api/v1/referral', referralRouter);
 app.use('/api/v1/special-offers', specialOffersRouter);
 app.use('/api/v1/customers', customersRouter);
 app.use('/api/v1/admin', adminPartnersRouter);
+app.use('/api/v1/admin', adminUsersRouter);
 app.use('/api/v1/bids', bidsRouter);
 app.use('/api/v1/support', supportRouter);
 app.use('/api/v1/banners', bannersRouter);
@@ -846,6 +1025,8 @@ app.use('/api/v1/auctions', auctionsRouter);
 app.use('/api/v1/wishlist', wishlistRouter);
 app.use('/api/v1/reviews', reviewsRouter);
 app.use('/api/v1/recently-viewed', recentlyViewedRouter);
+app.use('/api/v1/marketing', marketingRouter);
+app.use('/api/v1/about', aboutRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
