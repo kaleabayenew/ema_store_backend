@@ -247,7 +247,7 @@ async function login({ phone, email, password }) {
   // Determine query based on whether phone or email is provided
   let query, param;
   if (canonicalPhone) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins, u.profile_image,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.is_verified, u.is_blocked, u.block_reason, u.balance, u.coins, u.profile_image,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -255,7 +255,7 @@ async function login({ phone, email, password }) {
              WHERE u.phone = $1`;
     param = canonicalPhone;
   } else if (normalizedEmail) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.balance, u.coins, u.profile_image,
+    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.is_verified, u.is_blocked, u.block_reason, u.balance, u.coins, u.profile_image,
                     cp.full_name, au.admin_role
              FROM users u
              LEFT JOIN customer_user cp ON cp.user_id = u.id
@@ -273,6 +273,13 @@ async function login({ phone, email, password }) {
 
   if (!user) {
     throw new AppError('Account not found. Please check your credentials.', 401, 'USER_NOT_FOUND');
+  }
+  if (user.is_blocked || (!user.is_active && user.is_verified)) {
+    throw new AppError(
+      user.block_reason || 'Your account has been suspended by the administration. Please contact support.',
+      403,
+      'ACCOUNT_BLOCKED'
+    );
   }
   if (!user.is_active) {
     throw new AppError('Account not yet activated. Please verify your OTP.', 403, 'NOT_ACTIVATED');

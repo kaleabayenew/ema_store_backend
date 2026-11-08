@@ -1,4 +1,4 @@
-﻿const { pool } = require('../../core/config/database');
+const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 
 // ============================================================================
@@ -9,6 +9,71 @@ const { AppError } = require('../../core/errors/app_error');
 // 3. Product images
 // 4. Reviews
 // ============================================================================
+
+function _formatProduct(row) {
+  const priceCents = parseInt(row.price_cents) || 0;
+  const discountCents = parseInt(row.discount_cents) || 0;
+  const ratingAvg = parseFloat(row.rating_avg) || 0;
+  const ratingCount = parseInt(row.rating_count) || 0;
+  const soldCount = parseInt(row.sold_count) || 0;
+  const stock = parseInt(row.stock) || 0;
+  const primaryImg = row.primary_image_url || row.image_url || '';
+
+  return {
+    id: row.id,
+    partnerId: row.partner_id,
+    partner_id: row.partner_id,
+    categoryId: row.category,
+    category: row.category,
+    brandId: row.brand_id,
+    brand_id: row.brand_id,
+    name: row.name_en || row.name || 'Product',
+    nameEn: row.name_en,
+    nameAm: row.name_am,
+    nameOm: row.name_om,
+    name_en: row.name_en,
+    name_am: row.name_am,
+    name_om: row.name_om,
+    description: row.description_en || row.description || '',
+    descriptionEn: row.description_en,
+    descriptionAm: row.description_am,
+    descriptionOm: row.description_om,
+    description_en: row.description_en,
+    description_am: row.description_am,
+    description_om: row.description_om,
+    deliveryInfo: row.delivery_info,
+    delivery_info: row.delivery_info,
+    priceCents,
+    price_cents: priceCents,
+    discountCents,
+    discount_cents: discountCents,
+    sku: row.sku,
+    stock,
+    status: row.status || 'APPROVED',
+    isVisible: row.is_visible !== false,
+    is_visible: row.is_visible !== false,
+    ratingAvg,
+    rating_avg: ratingAvg,
+    ratingCount,
+    rating_count: ratingCount,
+    soldCount,
+    sold_count: soldCount,
+    primaryImageUrl: primaryImg,
+    image_url: primaryImg,
+    categoryName: row.category_name,
+    category_name: row.category_name,
+    categorySlug: row.category_slug,
+    category_slug: row.category_slug,
+    partnerName: row.partner_name,
+    partner_name: row.partner_name,
+    partnerOwner: row.partner_owner,
+    partner_owner: row.partner_owner,
+    createdAt: row.created_at,
+    created_at: row.created_at,
+    updatedAt: row.updated_at,
+    updated_at: row.updated_at,
+  };
+}
 
 // ── Get All Products (with filters) ───────────────────────────────────────────
 
@@ -66,9 +131,9 @@ async function getAllProducts({
      ${fromAndWhere} ${where}`,
     params,
   );
-  const total    = aggRes.rows[0]?.total ?? 0;
+  const total = aggRes.rows[0]?.total ?? 0;
   const approved = aggRes.rows[0]?.approved ?? 0;
-  const pending  = aggRes.rows[0]?.pending ?? 0;
+  const pending = aggRes.rows[0]?.pending ?? 0;
   const avgRating = parseFloat(aggRes.rows[0]?.avg_rating ?? 0) || 0;
 
   // Page query
@@ -87,6 +152,10 @@ async function getAllProducts({
   `;
 
   const { rows } = await pool.query(query, pageParams);
+  return { products: rows.map(_formatProduct), total, approved, pending, avgRating };
+}
+
+async function _legacy_mapping_getAllProducts() {
 
   const products = rows.map(row => ({
     id: row.id,
@@ -142,6 +211,10 @@ async function getNewArrivals({ limit = 5 } = {}) {
   `;
 
   const { rows } = await pool.query(query, [limit]);
+  return rows.map(_formatProduct);
+}
+
+async function _legacy_mapping_getNewArrivals() {
 
   return rows.map(row => ({
     id: row.id,
@@ -197,6 +270,10 @@ async function getFlashDealProducts({ limit = 10 } = {}) {
   `;
 
   const { rows } = await pool.query(query, [limit]);
+  return rows.map(_formatProduct);
+}
+
+async function _legacy_mapping_getNewArrivals() {
 
   return rows.map(row => ({
     id: row.id,
@@ -250,6 +327,10 @@ async function getPopularProducts({ limit = 10 } = {}) {
   `;
 
   const { rows } = await pool.query(query, [limit]);
+  return rows.map(_formatProduct);
+}
+
+async function _legacy_mapping_getNewArrivals() {
 
   return rows.map(row => ({
     id: row.id,
@@ -305,7 +386,7 @@ async function getProductById(id) {
     throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
   }
 
-  const product = rows[0];
+  const product = _formatProduct(rows[0]);
 
   // Get all images
   const { rows: images } = await pool.query(
@@ -324,6 +405,134 @@ async function getProductById(id) {
     images: images,
     variants: variants,
   };
+}
+
+// ── Get Seller Offers for a Product ──────────────────────────────────────────
+
+async function getSellerOffers(productId) {
+  const { rows } = await pool.query(
+    `SELECT
+       so.*,
+       pp.business_name as seller_name,
+       pp.rating_avg as seller_rating,
+       pp.rating_count as seller_review_count
+     FROM seller_offers so
+     LEFT JOIN partner_profile pp ON so.seller_id = pp.user_id
+     WHERE so.product_id = $1 AND so.is_active = true
+     ORDER BY so.price ASC`,
+    [productId],
+  );
+
+  return rows.map(row => ({
+    id: row.id,
+    sellerId: row.seller_id,
+    sellerName: row.seller_name,
+    price: row.price,
+    rating: row.seller_rating || 4.5,
+    reviewCount: row.seller_review_count || 0,
+    badge: row.badge,
+    badgeColor: row.badge_color,
+    deliveryInfo: row.delivery_info,
+    isActive: row.is_active,
+  }));
+}
+
+// ── Get Product Reactions ───────────────────────────────────────────────────
+
+async function getProductReactions(productId) {
+  const { rows } = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN reaction_type = 'like' THEN 1 ELSE 0 END), 0) as likes,
+       COALESCE(SUM(CASE WHEN reaction_type = 'dislike' THEN 1 ELSE 0 END), 0) as dislikes
+     FROM product_reactions
+     WHERE product_id = $1`,
+    [productId],
+  );
+
+  return {
+    likes: parseInt(rows[0]?.likes || 0),
+    dislikes: parseInt(rows[0]?.dislikes || 0),
+  };
+}
+
+// ── Get User's Reaction for a Product ─────────────────────────────────────────
+
+async function getUserReaction(productId, userId) {
+  const { rows } = await pool.query(
+    `SELECT reaction_type FROM product_reactions
+     WHERE product_id = $1 AND user_id = $2`,
+    [productId, userId],
+  );
+
+  if (rows.length === 0) return null;
+  return rows[0].reaction_type;
+}
+
+// ── Add/Update Reaction ─────────────────────────────────────────────────────
+
+async function setReaction(productId, userId, reaction) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Check if reaction already exists
+    const { rows: existing } = await client.query(
+      `SELECT reaction_type FROM product_reactions
+       WHERE product_id = $1 AND user_id = $2`,
+      [productId, userId],
+    );
+
+    if (existing.length > 0) {
+      // Update existing reaction
+      if (reaction === existing[0].reaction_type) {
+        // Remove reaction if same
+        await client.query(
+          'DELETE FROM product_reactions WHERE product_id = $1 AND user_id = $2',
+          [productId, userId],
+        );
+      } else {
+        // Update to new reaction
+        await client.query(
+          'UPDATE product_reactions SET reaction_type = $1 WHERE product_id = $2 AND user_id = $3',
+          [reaction, productId, userId],
+        );
+      }
+    } else {
+      // Insert new reaction
+      await client.query(
+        `INSERT INTO product_reactions (product_id, user_id, reaction_type)
+         VALUES ($1, $2, $3)`,
+        [productId, userId, reaction],
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ── Get Product Viewers Count ─────────────────────────────────────────────────
+
+async function getProductViewers(productId) {
+  // This is a simplified version - in production, you'd use a real-time system
+  // For now, we'll return a random number between 10 and 100 based on product popularity
+  const { rows } = await pool.query(
+    `SELECT sold_count, rating_count FROM products WHERE id = $1`,
+    [productId],
+  );
+
+  if (rows.length === 0) return 0;
+
+  const soldCount = rows[0].sold_count || 0;
+  const ratingCount = rows[0].rating_count || 0;
+
+  // Calculate viewers based on product popularity
+  const baseViewers = Math.min(100, Math.max(10, Math.floor((soldCount + ratingCount) / 10)));
+  return baseViewers;
 }
 
 // ── Create Product ─────────────────────────────────────────────────────────
@@ -359,7 +568,7 @@ async function createProduct(data) {
       ],
     );
 
-    const product = rows[0];
+    const product = _formatProduct(rows[0]);
 
     // Add images
     for (let i = 0; i < images.length; i++) {
@@ -492,6 +701,9 @@ async function updateProductRating(productId) {
 
 module.exports = {
   getAllProducts,
+  getNewArrivals,
+  getFlashDealProducts,
+  getPopularProducts,
   getProductById,
   createProduct,
   updateProduct,
@@ -499,4 +711,9 @@ module.exports = {
   getAllCategories,
   getProductReviews,
   updateProductRating,
+  getSellerOffers,
+  getProductReactions,
+  getUserReaction,
+  setReaction,
+  getProductViewers,
 };

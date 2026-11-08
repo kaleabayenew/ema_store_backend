@@ -40,7 +40,7 @@ async function getCustomerPassword(id) {
   if (rows.length === 0) return null;
   return {
     password: rows[0].password_plain || null,
-    phone:    rows[0].phone,
+    phone: rows[0].phone,
   };
 }
 
@@ -55,10 +55,10 @@ async function resetCustomerPassword(id) {
   );
   if (rows.length === 0) return null;
 
-  const phone          = rows[0].phone;
+  const phone = rows[0].phone;
   const canonicalPhone = normalizePhone(phone);
-  const newPassword    = generateReadablePassword();
-  const passwordHash   = await bcrypt.hash(newPassword, 12);
+  const newPassword = generateReadablePassword();
+  const passwordHash = await bcrypt.hash(newPassword, 12);
 
   await pool.query(
     `UPDATE users
@@ -77,8 +77,8 @@ async function resetCustomerPassword(id) {
   if (chatRows.length > 0) {
     const result = await sendTelegramPassword(chatRows[0].chat_id, phone, newPassword);
     delivery = {
-      sent:  result.success === true,
-      note:  result.success
+      sent: result.success === true,
+      note: result.success
         ? 'New password sent to the customer on Telegram.'
         : (result.error || 'Failed to send via Telegram.'),
     };
@@ -104,9 +104,9 @@ async function listCustomers({ search = '', status = 'all', page = 1, limit = 20
   }
 
   if (status === 'active') {
-    where += ` AND u.is_active = true`;
+    where += ` AND (u.is_active = true AND (u.is_blocked IS NULL OR u.is_blocked = false))`;
   } else if (status === 'blocked') {
-    where += ` AND u.is_active = false`;
+    where += ` AND (u.is_active = false OR u.is_blocked = true)`;
   }
 
   const countResult = await pool.query(
@@ -141,16 +141,16 @@ async function listCustomers({ search = '', status = 'all', page = 1, limit = 20
 
   return {
     customers: rows.map((r) => ({
-      id:          r.id,
-      fullName:    r.full_name || 'Unknown',
-      phone:       r.phone,
-      isActive:    r.is_active,
-      balance:     parseFloat(r.balance) || 0,
-      coins:       r.coins || 0,
+      id: r.id,
+      fullName: r.full_name || 'Unknown',
+      phone: r.phone,
+      isActive: r.is_active,
+      balance: parseFloat(r.balance) || 0,
+      coins: r.coins || 0,
       totalOrders: r.total_orders,
-      totalSpent:  parseFloat(r.total_spent) || 0,
-      joinedAt:    r.created_at,
-      avatarUrl:   r.avatar_url || null,
+      totalSpent: parseFloat(r.total_spent) || 0,
+      joinedAt: r.created_at,
+      avatarUrl: r.avatar_url || null,
     })),
     total,
     page,
@@ -182,16 +182,16 @@ async function getCustomer(id) {
   const r = rows[0];
 
   return {
-    id:          r.id,
-    fullName:    r.full_name || 'Unknown',
-    phone:       r.phone,
-    isActive:    r.is_active,
-    balance:     parseFloat(r.balance) || 0,
-    coins:       r.coins || 0,
+    id: r.id,
+    fullName: r.full_name || 'Unknown',
+    phone: r.phone,
+    isActive: r.is_active,
+    balance: parseFloat(r.balance) || 0,
+    coins: r.coins || 0,
     totalOrders: r.total_orders,
-    totalSpent:  parseFloat(r.total_spent) || 0,
-    joinedAt:    r.created_at,
-    avatarUrl:   r.avatar_url || null,
+    totalSpent: parseFloat(r.total_spent) || 0,
+    joinedAt: r.created_at,
+    avatarUrl: r.avatar_url || null,
   };
 }
 
@@ -228,24 +228,29 @@ async function getCustomerOrders(customerId) {
   );
 
   return rows.map((r) => ({
-    id:              r.id,
-    totalAmount:     parseFloat(r.total_amount) || 0,
-    status:          r.status,
+    id: r.id,
+    totalAmount: parseFloat(r.total_amount) || 0,
+    status: r.status,
     shippingAddress: r.shipping_address,
-    createdAt:       r.created_at,
-    updatedAt:       r.updated_at,
-    items:           r.items || [],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    items: r.items || [],
   }));
 }
 
 /**
  * Block or unblock a customer.
  */
-async function setCustomerBlock(id, block) {
+async function setCustomerBlock(id, block, reason = null) {
+  const defaultReason = block ? 'Your account has been suspended by the administration. Please contact support.' : null;
   const { rowCount } = await pool.query(
-    `UPDATE users SET is_active = $1, updated_at = NOW()
-     WHERE id = $2 AND role = 'CUSTOMER'`,
-    [!block, id]
+    `UPDATE users
+     SET is_active = $1,
+         is_blocked = $2,
+         block_reason = $3,
+         updated_at = NOW()
+     WHERE id = $4 AND role = 'CUSTOMER'`,
+    [!block, block, reason || defaultReason, id]
   );
   return rowCount > 0;
 }

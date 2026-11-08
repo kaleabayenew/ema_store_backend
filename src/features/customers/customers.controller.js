@@ -44,9 +44,25 @@ async function getOrdersByCustomer(req, res, next) {
 
 async function getPassword(req, res, next) {
   try {
+    // PIN gate — only reveal the plain password to authorized admins
+    const pin = (req.query.pin || (req.body && req.body.pin)) || '';
+    const expectedPin = process.env.PASSWORD_REVEAL_PIN || '1234';
+    if (String(pin) !== String(expectedPin)) {
+      return res.status(403).json({ success: false, message: 'Incorrect PIN' });
+    }
+
     const result = await getCustomerPassword(req.params.id);
     if (!result) return next(new AppError('Customer not found', 404, 'NOT_FOUND'));
-    res.json({ success: true, data: result });
+
+    // hashed = true when we only have the bcrypt hash (cannot be revealed)
+    res.json({
+      success: true,
+      data: {
+        password: result.password,
+        hashed: !result.password, // no plain password on record → only hash exists
+        phone: result.phone,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -64,11 +80,11 @@ async function resetPassword(req, res, next) {
 
 async function blockCustomer(req, res, next) {
   try {
-    const { block } = req.body;
+    const { block, reason } = req.body;
     if (typeof block !== 'boolean') {
       return res.status(400).json({ success: false, message: '`block` (boolean) is required' });
     }
-    const ok = await setCustomerBlock(req.params.id, block);
+    const ok = await setCustomerBlock(req.params.id, block, reason);
     if (!ok) return next(new AppError('Customer not found', 404, 'NOT_FOUND'));
     res.json({ success: true, message: block ? 'Customer blocked' : 'Customer unblocked' });
   } catch (err) {

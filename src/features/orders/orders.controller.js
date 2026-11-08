@@ -1,5 +1,5 @@
-﻿const service = require('./orders.service');
-const { ok, created, error } = require('../../core/utils/response');
+const service = require('./orders.service');
+const { ok, created } = require('../../core/utils/response');
 
 // ── POST /api/v1/orders
 // Create order from cart
@@ -10,7 +10,7 @@ const createOrder = async (req, res, next) => {
 
     const order = await service.createOrder(userId, shippingAddress, paymentMethod);
 
-    created(res, order);
+    created(res, { order });
   } catch (err) {
     next(err);
   }
@@ -25,11 +25,41 @@ const getUserOrders = async (req, res, next) => {
 
     const orders = await service.getUserOrders(
       userId,
-      parseInt(limit) || 20,
-      parseInt(offset) || 0
+      parseInt(limit, 10) || 20,
+      parseInt(offset, 10) || 0
     );
 
     ok(res, { orders, count: orders.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/orders/admin/all
+// Admin get all orders
+const getAllOrders = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 20, status, search } = req.query;
+    const result = await service.getAllOrders({
+      page: parseInt(page, 10),
+      limit: parseInt(limit, 10),
+      status,
+      search,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── PATCH /api/v1/orders/:id/status
+// Admin update status
+const updateStatus = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const order = await service.updateOrderStatus(id, status);
+    ok(res, { order });
   } catch (err) {
     next(err);
   }
@@ -53,5 +83,7 @@ const getOrderById = async (req, res, next) => {
 module.exports = {
   createOrder,
   getUserOrders,
+  getAllOrders,
+  updateStatus,
   getOrderById,
 };

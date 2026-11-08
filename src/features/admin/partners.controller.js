@@ -1,10 +1,6 @@
 const { ok, error } = require('../../core/utils/response');
 const { AppError } = require('../../core/errors/app_error');
-const { Pool } = require('pg');
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+const { pool } = require('../../core/config/database');
 
 // ── GET /api/v1/admin/partners
 // Query: ?search=&status=&page=&limit=

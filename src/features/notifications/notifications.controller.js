@@ -150,6 +150,27 @@ const sendAnnouncement = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/notifications/admin/all  (Admin: recent notifications across all users)
+const getAllNotifications = async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 30;
+    const offset = parseInt(req.query.offset) || 0;
+    const { pool } = require('../../core/config/database');
+    const { rows } = await pool.query(
+      `SELECT n.id, n.title, n.body, n.is_read, n.data, n.created_at,
+              COALESCE(cu.full_name, u.phone) AS recipient_name, u.phone
+       FROM notifications n
+       LEFT JOIN users u ON u.id = n.user_id
+       LEFT JOIN customer_user cu ON cu.user_id = n.user_id
+       ORDER BY n.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset],
+    );
+    const countRes = await pool.query(`SELECT COUNT(*)::int AS total FROM notifications`);
+    ok(res, { notifications: rows, total: countRes.rows[0].total });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   updateFcmToken,
   getNotifications,
@@ -157,4 +178,5 @@ module.exports = {
   markAllAsRead,
   deleteNotification,
   sendAnnouncement,
+  getAllNotifications,
 };

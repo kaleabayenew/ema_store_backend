@@ -15,5 +15,7 @@ router.delete('/:id', requireAuth, ctrl.deleteNotification);
 
 // ── Admin: Send Announcements ───────────────────────────────────────────────
 router.post('/announce', requireAuth, ctrl.sendAnnouncement);
+// ── Admin: Get all notifications ────────────────────────────────────────────
+router.get('/admin/all', requireAuth, ctrl.getAllNotifications);
 
 module.exports = router;

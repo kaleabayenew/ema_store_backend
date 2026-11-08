@@ -175,6 +175,74 @@ const getPopularProducts = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/products/:id/seller-offers
+// Get seller offers for a product
+const getSellerOffers = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const offers = await service.getSellerOffers(id);
+
+    ok(res, { offers, count: offers.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/products/:id/reactions
+// Get reaction counts for a product
+const getProductReactions = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const reactions = await service.getProductReactions(id);
+
+    ok(res, reactions);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── POST /api/v1/products/:id/reactions
+// Set user's reaction for a product (requires auth)
+const setProductReaction = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reaction } = req.body; // 'like' or 'dislike'
+    const userId = req.user?.id; // From auth middleware
+
+    if (!userId) {
+      return error(res, 'Authentication required', 401);
+    }
+
+    if (!reaction || !['like', 'dislike'].includes(reaction)) {
+      return error(res, 'Invalid reaction type', 400);
+    }
+
+    await service.setReaction(id, userId, reaction);
+
+    const reactions = await service.getProductReactions(id);
+
+    ok(res, { message: 'Reaction updated', ...reactions });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/products/:id/viewers
+// Get current viewers count for a product
+const getProductViewers = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const viewers = await service.getProductViewers(id);
+
+    ok(res, { viewers });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAllProducts,
   getProductById,
@@ -186,4 +254,8 @@ module.exports = {
   getNewArrivals,
   getFlashDealProducts,
   getPopularProducts,
+  getSellerOffers,
+  getProductReactions,
+  setProductReaction,
+  getProductViewers,
 };

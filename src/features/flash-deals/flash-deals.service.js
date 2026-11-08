@@ -52,7 +52,7 @@ async function createFlashDeal({
       for (const categoryId of categoryIds) {
         await client.query(
           `INSERT INTO flash_deal_categories (flash_deal_id, category_id)
-           VALUES ($1, $2)`,
+           VALUES ($1, $2::varchar)`,
           [dealId, categoryId],
         );
       }

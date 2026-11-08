@@ -1,11 +1,21 @@
 const { Router } = require('express');
-const ctrl = require('./partners.controller');
+const partnerCtrl   = require('./partners.controller');
+const orderCtrl     = require('./orders.controller');
+const dashboardCtrl = require('./dashboard.controller');
 
 const router = Router();
 
-// Get all partners (for admin panel)
-router.get('/partners', ctrl.getAllPartners);
-router.get('/partners/:id', ctrl.getPartnerById);
-router.patch('/partners/:id/status', ctrl.updatePartnerStatus);
+// Dashboard
+router.get('/dashboard', dashboardCtrl.getDashboard);
+
+// Partners
+router.get('/partners',              partnerCtrl.getAllPartners);
+router.get('/partners/:id',          partnerCtrl.getPartnerById);
+router.patch('/partners/:id/status', partnerCtrl.updatePartnerStatus);
+
+// Orders
+router.get('/orders',                orderCtrl.getAllOrders);
+router.get('/orders/:id',            orderCtrl.getOrderById);
+router.patch('/orders/:id/status',   orderCtrl.updateOrderStatus);
 
 module.exports = router;
