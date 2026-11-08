@@ -14,10 +14,18 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'http://localhost:54321',
   'http://10.0.2.2:3000',
-  // 127.0.0.1 is treated as a distinct origin from localhost by browsers/Flutter web
-  'http://127.0.0.1:3000',
+  // Flutter web dev server ports
+  'http://localhost:2835',
+  'http://127.0.0.1:2835',
+  'http://localhost:20413',
+  'http://127.0.0.1:20413',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+  'http://localhost:12837',
+  'http://127.0.0.1:12837',
 ].filter(Boolean); // remove any undefined entries
 
 module.exports = Object.freeze({
