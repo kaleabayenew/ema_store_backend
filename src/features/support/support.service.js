@@ -3,24 +3,24 @@ const { AppError } = require('../../core/errors/app_error');
 
 // ── Create ticket (customer) ───────────────────────────────────────────────────
 
-async function createTicket({ userId, subject, initialMessage, priority = 'MEDIUM' }) {
+async function createTicket({ userId, guestId, subject, initialMessage, priority = 'MEDIUM' }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const ticketRes = await client.query(
-      `INSERT INTO support_tickets (user_id, subject, status, priority)
-       VALUES ($1, $2, 'OPEN', $3)
+      `INSERT INTO support_tickets (user_id, guest_id, subject, status, priority)
+       VALUES ($1, $2, $3, 'OPEN', $4)
        RETURNING *`,
-      [userId || null, subject, priority],
+      [userId || null, guestId || null, subject, priority],
     );
     const ticket = ticketRes.rows[0];
 
     const messageRes = await client.query(
-      `INSERT INTO support_messages (ticket_id, sender_id, body, is_staff)
-       VALUES ($1, $2, $3, false)
+      `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
+       VALUES ($1, $2, $3, $4, false)
        RETURNING *`,
-      [ticket.id, userId || null, initialMessage],
+      [ticket.id, userId || null, guestId || null, initialMessage],
     );
 
     await client.query('COMMIT');
@@ -141,7 +141,7 @@ async function getTicket(id) {
   const { rows } = await pool.query(
     `SELECT
        t.*,
-       COALESCE(cu.full_name, u.phone, 'Guest') AS customer_name,
+       COALESCE(cu.full_name, u.phone, t.guest_id) AS customer_name,
        u.phone                         AS customer_phone,
        u.email                         AS customer_email
      FROM support_tickets t
@@ -154,7 +154,7 @@ async function getTicket(id) {
 
   const { rows: messages } = await pool.query(
     `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at,
-            COALESCE(cu.full_name, u.phone, 'Guest', 'Admin') AS sender_name
+            COALESCE(cu.full_name, u.phone, m.guest_id, 'Admin') AS sender_name
      FROM support_messages m
      LEFT JOIN users u         ON u.id = m.sender_id
      LEFT JOIN customer_user cu ON cu.user_id = m.sender_id
@@ -187,11 +187,11 @@ async function getTicket(id) {
 
 // ── Add reply ─────────────────────────────────────────────────────────────────
 
-async function addReply(ticketId, { senderId, body, isStaff = true }) {
+async function addReply(ticketId, { senderId, guestId, body, isStaff = true }) {
   const { rows } = await pool.query(
-    `INSERT INTO support_messages (ticket_id, sender_id, body, is_staff)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [ticketId, senderId || null, body, isStaff],
+    `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [ticketId, senderId || null, guestId || null, body, isStaff],
   );
   await pool.query(
     `UPDATE support_tickets
