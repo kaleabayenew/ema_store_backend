@@ -10,6 +10,33 @@ const { AppError } = require('../../core/errors/app_error');
 // 4. Reviews
 // ============================================================================
 
+function _formatProductForList(row) {
+  const priceCents = parseInt(row.price_cents) || 0;
+  const discountCents = parseInt(row.discount_cents) || 0;
+  const ratingAvg = parseFloat(row.rating_avg) || 0;
+  const ratingCount = parseInt(row.rating_count) || 0;
+  const soldCount = parseInt(row.sold_count) || 0;
+  const stock = parseInt(row.stock) || 0;
+  const primaryImg = row.primary_image_url || row.image_url || '';
+
+  return {
+    id: row.id,
+    name: row.name_en || row.name || 'Product',
+    category: row.category,
+    price: Math.round(priceCents / 100),
+    priceCents,
+    discountCents,
+    rating: ratingAvg,
+    reviewCount: ratingCount,
+    imageUrl: primaryImg,
+    stock,
+    status: row.status || 'APPROVED',
+    primaryImageUrl: primaryImg,
+    categoryName: row.category_name,
+    categorySlug: row.category_slug,
+  };
+}
+
 function _formatProduct(row) {
   const priceCents = parseInt(row.price_cents) || 0;
   const discountCents = parseInt(row.discount_cents) || 0;
@@ -84,6 +111,7 @@ async function getAllProducts({
   partnerId,
   limit = 20,
   offset = 0,
+  lean = false,
 } = {}) {
   const fromAndWhere = `
     FROM products p
@@ -136,9 +164,27 @@ async function getAllProducts({
   const pending = aggRes.rows[0]?.pending ?? 0;
   const avgRating = parseFloat(aggRes.rows[0]?.avg_rating ?? 0) || 0;
 
-  // Page query
+  // Page query - use lean format for list views
   const pageParams = [...params, limit, offset];
-  const query = `
+  const query = lean ? `
+    SELECT
+      p.id,
+      p.name_en,
+      p.name,
+      p.category,
+      p.price_cents,
+      p.discount_cents,
+      p.rating_avg,
+      p.rating_count,
+      p.stock,
+      p.status,
+      pi.image_url as primary_image_url,
+      c.name_en as category_name,
+      c.slug as category_slug
+    ${fromAndWhere} ${where}
+    ORDER BY p.created_at DESC
+    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+  ` : `
     SELECT
       p.*,
       pi.image_url as primary_image_url,
@@ -152,7 +198,8 @@ async function getAllProducts({
   `;
 
   const { rows } = await pool.query(query, pageParams);
-  return { products: rows.map(_formatProduct), total, approved, pending, avgRating };
+  const formatter = lean ? _formatProductForList : _formatProduct;
+  return { products: rows.map(formatter), total, approved, pending, avgRating };
 }
 
 async function _legacy_mapping_getAllProducts() {

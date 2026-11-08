@@ -122,6 +122,8 @@ async function listCustomers({ search = '', status = 'all', page = 1, limit = 20
        u.id,
        u.phone,
        u.is_active,
+       COALESCE(u.is_blocked, false) AS is_blocked,
+       u.block_reason,
        u.balance,
        u.coins,
        u.created_at,
@@ -144,7 +146,9 @@ async function listCustomers({ search = '', status = 'all', page = 1, limit = 20
       id: r.id,
       fullName: r.full_name || 'Unknown',
       phone: r.phone,
-      isActive: r.is_active,
+      isActive: r.is_active && !r.is_blocked,
+      isBlocked: !!r.is_blocked,
+      blockReason: r.block_reason || null,
       balance: parseFloat(r.balance) || 0,
       coins: r.coins || 0,
       totalOrders: r.total_orders,
@@ -165,7 +169,8 @@ async function listCustomers({ search = '', status = 'all', page = 1, limit = 20
 async function getCustomer(id) {
   const { rows } = await pool.query(
     `SELECT
-       u.id, u.phone, u.is_active, u.balance, u.coins, u.created_at,
+       u.id, u.phone, u.is_active, COALESCE(u.is_blocked, false) AS is_blocked, u.block_reason,
+       u.balance, u.coins, u.created_at,
        COALESCE(cp.full_name, '') AS full_name,
        COALESCE(cp.avatar_url, '') AS avatar_url,
        COUNT(DISTINCT o.id)::int AS total_orders,
@@ -173,7 +178,7 @@ async function getCustomer(id) {
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
      LEFT JOIN orders o ON o.user_id = u.id
-     WHERE u.id = $1 AND u.role = 'CUSTOMER'
+     WHERE u.id = $1 AND UPPER(u.role) = 'CUSTOMER'
      GROUP BY u.id, cp.full_name, cp.avatar_url`,
     [id]
   );
@@ -185,7 +190,9 @@ async function getCustomer(id) {
     id: r.id,
     fullName: r.full_name || 'Unknown',
     phone: r.phone,
-    isActive: r.is_active,
+    isActive: r.is_active && !r.is_blocked,
+    isBlocked: !!r.is_blocked,
+    blockReason: r.block_reason || null,
     balance: parseFloat(r.balance) || 0,
     coins: r.coins || 0,
     totalOrders: r.total_orders,
@@ -242,15 +249,17 @@ async function getCustomerOrders(customerId) {
  * Block or unblock a customer.
  */
 async function setCustomerBlock(id, block, reason = null) {
-  const defaultReason = block ? 'Your account has been suspended by the administration. Please contact support.' : null;
+  const defaultReason = block
+    ? 'Your account has been suspended by the administration. Please contact support.'
+    : null;
   const { rowCount } = await pool.query(
     `UPDATE users
      SET is_active = $1,
          is_blocked = $2,
          block_reason = $3,
          updated_at = NOW()
-     WHERE id = $4 AND role = 'CUSTOMER'`,
-    [!block, block, reason || defaultReason, id]
+     WHERE id = $4 AND UPPER(role) = 'CUSTOMER'`,
+    [!block, block, block ? (reason || defaultReason) : null, id]
   );
   return rowCount > 0;
 }

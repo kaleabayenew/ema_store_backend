@@ -378,6 +378,48 @@ async function updateProfileImage(userId, profileImageUrl) {
   );
 }
 
+async function getCurrentUser(userId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, u.profile_image,
+            COALESCE(u.is_blocked, false) AS is_blocked,
+            u.block_reason,
+            u.is_active,
+            u.referral_code,
+            cp.full_name
+     FROM users u
+     LEFT JOIN customer_user cp ON cp.user_id = u.id
+     WHERE u.id = $1`,
+    [userId]
+  );
+  if (rows.length === 0) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+  const u = rows[0];
+
+  if (u.is_blocked || u.is_active === false) {
+    throw new AppError(
+      u.block_reason || 'Your account has been suspended by the administration. Please contact support.',
+      403,
+      'ACCOUNT_BLOCKED'
+    );
+  }
+
+  return {
+    id: u.id,
+    phone: u.phone,
+    email: u.email,
+    fullName: u.full_name || u.phone,
+    role: u.role,
+    balance: parseFloat(u.balance) || 0,
+    coins: u.coins || 0,
+    referralCode: u.referral_code || '',
+    profileImage: u.profile_image || null,
+    isBlocked: !!u.is_blocked,
+    isActive: u.is_active,
+    blockReason: u.block_reason || null,
+  };
+}
+
 module.exports = {
   normalizePhone,
   sendOtp,
@@ -388,4 +430,5 @@ module.exports = {
   forgotPasswordStep1,
   forgotPasswordStep2,
   updateProfileImage,
+  getCurrentUser,
 };

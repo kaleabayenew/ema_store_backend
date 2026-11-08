@@ -6,7 +6,7 @@ const { ok, created, error } = require('../../core/utils/response');
 // Get all products with filters + pagination
 const getAllProducts = async (req, res, next) => {
   try {
-    const { category, search, status, partnerId } = req.query;
+    const { category, search, status, partnerId, lean } = req.query;
     const limit = parseInt(req.query.limit) || 15;
     const page  = Math.max(1, parseInt(req.query.page) || 1);
     const offset = (page - 1) * limit;
@@ -18,6 +18,7 @@ const getAllProducts = async (req, res, next) => {
       partnerId,
       limit,
       offset,
+      lean: lean === 'true' || lean === '1',
     });
 
     ok(res, {

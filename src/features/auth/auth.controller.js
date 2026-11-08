@@ -148,6 +148,21 @@ const updateProfileImage = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/auth/me ───────────────────────────────────────────────────
+// Hydrates current authenticated user and verifies active/block status
+const getMe = async (req, res, next) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return error(res, 'Authentication required.', 401, 'UNAUTHORIZED');
+    }
+    const user = await service.getCurrentUser(userId);
+    ok(res, { user });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   register,
   registerVerify,
@@ -156,4 +171,5 @@ module.exports = {
   resetPassword,
   resendOtp,
   updateProfileImage,
+  getMe,
 };
