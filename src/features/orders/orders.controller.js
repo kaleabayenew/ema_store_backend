@@ -2,13 +2,13 @@ const service = require('./orders.service');
 const { ok, created } = require('../../core/utils/response');
 
 // ── POST /api/v1/orders
-// Create order from cart
+// Create order from cart or direct items
 const createOrder = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { shippingAddress, paymentMethod } = req.body;
+    const { shippingAddress, paymentMethod, items } = req.body;
 
-    const order = await service.createOrder(userId, shippingAddress, paymentMethod);
+    const order = await service.createOrder(userId, shippingAddress, paymentMethod, items);
 
     created(res, { order });
   } catch (err) {
@@ -65,6 +65,18 @@ const updateStatus = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/orders/admin/:id
+// Admin get specific order (no userId restriction, returns ETB prices)
+const getAdminOrderById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const order = await service.getOrderById(id, null, true); // forAdmin=true
+    ok(res, { order });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ── GET /api/v1/orders/:id
 // Get specific order
 const getOrderById = async (req, res, next) => {
@@ -84,6 +96,7 @@ module.exports = {
   createOrder,
   getUserOrders,
   getAllOrders,
+  getAdminOrderById,
   updateStatus,
   getOrderById,
 };

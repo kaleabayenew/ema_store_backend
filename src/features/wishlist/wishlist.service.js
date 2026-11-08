@@ -10,17 +10,17 @@ class WishlistService {
         w.product_id,
         w.created_at,
         p.id,
-        p.name,
-        p.description,
+        COALESCE(p.name_en, p.name) AS name,
+        COALESCE(p.description_en, p.description) AS description,
         p.price_cents,
-        p.image_url,
-        p.old_price_cents,
-        p.rating,
-        p.review_count,
-        p.stock,
-        p.category_id
+        p.discount_cents,
+        COALESCE(pi.image_url, p.image_url) AS image_url,
+        p.rating_avg AS rating,
+        p.rating_count AS review_count,
+        p.stock
       FROM wishlist w
-      LEFT JOIN products p ON w.product_id = p.id
+      JOIN products p ON w.product_id = p.id
+      LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
       WHERE w.user_id = $1
       ORDER BY w.created_at DESC
     `;
@@ -37,12 +37,11 @@ class WishlistService {
           name: row.name,
           description: row.description,
           priceCents: parseInt(row.price_cents),
+          discountCents: row.discount_cents ? parseInt(row.discount_cents) : null,
           imageUrl: row.image_url,
-          oldPriceCents: row.old_price_cents ? parseInt(row.old_price_cents) : null,
           rating: row.rating ? parseFloat(row.rating) : 0,
           reviewCount: row.review_count ? parseInt(row.review_count) : 0,
-          stock: row.stock ? parseInt(row.stock) : 0,
-          categoryId: row.category_id
+          stock: row.stock ? parseInt(row.stock) : 0
         }
       }))
     };
@@ -89,17 +88,16 @@ class WishlistService {
   // Check if product is in wishlist
   async isInWishlist(userId, productId) {
     const query = `
-      SELECT COUNT(*) as count
+      SELECT 1
       FROM wishlist
       WHERE user_id = $1 AND product_id = $2
     `;
 
     const result = await pool.query(query, [userId, productId]);
-    const count = parseInt(result.rows[0].count);
 
     return {
       success: true,
-      inWishlist: count > 0
+      inWishlist: result.rows.length > 0
     };
   }
 

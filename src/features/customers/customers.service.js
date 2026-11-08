@@ -255,4 +255,110 @@ async function setCustomerBlock(id, block, reason = null) {
   return rowCount > 0;
 }
 
-module.exports = { listCustomers, getCustomer, getCustomerOrders, getCustomerPassword, resetCustomerPassword, setCustomerBlock };
+/**
+ * Get customer profile for authenticated user.
+ */
+async function getCustomerProfile(userId) {
+  const { rows } = await pool.query(
+    `SELECT
+       u.id,
+       u.phone,
+       u.email,
+       u.balance,
+       u.coins,
+       u.is_active,
+       u.is_blocked,
+       u.profile_image,
+       COALESCE(cp.full_name, '') AS full_name,
+       COALESCE(cp.avatar_url, u.profile_image) AS avatar_url,
+       u.created_at
+     FROM users u
+     LEFT JOIN customer_user cp ON cp.user_id = u.id
+     WHERE u.id = $1`,
+    [userId]
+  );
+
+  if (rows.length === 0) {
+    throw new AppError('Customer not found', 404, 'CUSTOMER_NOT_FOUND');
+  }
+
+  const r = rows[0];
+
+  return {
+    id: r.id,
+    phone: r.phone,
+    email: r.email,
+    fullName: r.full_name || '',
+    profileImage: r.profile_image,
+    avatarUrl: r.avatar_url,
+    balance: parseFloat(r.balance) || 0,
+    coins: r.coins || 0,
+    isActive: r.is_active,
+    isBlocked: r.is_blocked,
+    createdAt: r.created_at,
+    // Snake_case for compatibility
+    full_name: r.full_name || '',
+    avatar_url: r.avatar_url,
+    profile_image: r.profile_image,
+  };
+}
+
+/**
+ * Update customer profile.
+ */
+async function updateCustomerProfile(userId, { fullName, avatarUrl, email }) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Update customer_user table
+    if (fullName || avatarUrl) {
+      await client.query(
+        `INSERT INTO customer_user (user_id, full_name, avatar_url, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (user_id) DO UPDATE
+         SET full_name = COALESCE($2, customer_user.full_name),
+             avatar_url = COALESCE($3, customer_user.avatar_url),
+             updated_at = NOW()`,
+        [userId, fullName || null, avatarUrl || null]
+      );
+    }
+
+    // Update users table for avatar and email
+    if (avatarUrl) {
+      await client.query(
+        `UPDATE users SET profile_image = $1 WHERE id = $2`,
+        [avatarUrl, userId]
+      );
+    }
+
+    if (email) {
+      await client.query(
+        `UPDATE users SET email = $1 WHERE id = $2`,
+        [email, userId]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Return updated profile
+    return await getCustomerProfile(userId);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = {
+  listCustomers,
+  getCustomer,
+  getCustomerOrders,
+  getCustomerPassword,
+  resetCustomerPassword,
+  setCustomerBlock,
+  getCustomerProfile,
+  updateCustomerProfile,
+};

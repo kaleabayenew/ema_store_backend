@@ -5,6 +5,8 @@ const {
   getCustomerPassword,
   resetCustomerPassword,
   setCustomerBlock,
+  getCustomerProfile,
+  updateCustomerProfile,
 } = require('./customers.service');
 const { AppError } = require('../../core/errors/app_error');
 
@@ -92,6 +94,25 @@ async function blockCustomer(req, res, next) {
   }
 }
 
+async function getProfile(req, res, next) {
+  try {
+    const customer = await getCustomerProfile(req.user.id);
+    res.json({ success: true, customer });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateProfile(req, res, next) {
+  try {
+    const { fullName, avatarUrl, email } = req.body;
+    const customer = await updateCustomerProfile(req.user.id, { fullName, avatarUrl, email });
+    res.json({ success: true, customer });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCustomers,
   getCustomerById,
@@ -99,4 +120,6 @@ module.exports = {
   getPassword,
   resetPassword,
   blockCustomer,
+  getProfile,
+  updateProfile,
 };

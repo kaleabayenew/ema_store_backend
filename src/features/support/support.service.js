@@ -1,6 +1,75 @@
 ﻿const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 
+// ── Create ticket (customer) ───────────────────────────────────────────────────
+
+async function createTicket({ userId, subject, initialMessage, priority = 'MEDIUM' }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // Insert ticket
+    const ticketRes = await client.query(
+      `INSERT INTO support_tickets (user_id, subject, status, priority)
+       VALUES ($1, $2, 'OPEN', $3)
+       RETURNING *`,
+      [userId, subject, priority],
+    );
+    
+    const ticket = ticketRes.rows[0];
+    
+    // Insert initial customer message
+    const messageRes = await client.query(
+      `INSERT INTO support_messages (ticket_id, sender_id, body, is_staff)
+       VALUES ($1, $2, $3, false)
+       RETURNING *`,
+      [ticket.id, userId, initialMessage],
+    );
+    
+    await client.query('COMMIT');
+    
+    return {
+      id: ticket.id,
+      subject: ticket.subject,
+      status: ticket.status,
+      priority: ticket.priority,
+      createdAt: ticket.created_at,
+      updatedAt: ticket.updated_at,
+      initialMessage: messageRes.rows[0],
+    };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// ── Get customer tickets ──────────────────────────────────────────────────────
+
+async function getCustomerTickets(userId) {
+  const { rows } = await pool.query(
+    `SELECT t.id, t.subject, t.status, t.priority, t.created_at, t.updated_at,
+            (SELECT body FROM support_messages WHERE ticket_id = t.id ORDER BY sent_at DESC LIMIT 1) AS last_message,
+            (SELECT sent_at FROM support_messages WHERE ticket_id = t.id ORDER BY sent_at DESC LIMIT 1) AS last_message_at
+     FROM support_tickets t
+     WHERE t.user_id = $1
+     ORDER BY t.updated_at DESC`,
+    [userId],
+  );
+  
+  return rows.map((r) => ({
+    id: r.id,
+    subject: r.subject,
+    status: r.status,
+    priority: r.priority,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    lastMessage: r.last_message,
+    lastMessageAt: r.last_message_at,
+  }));
+}
+
 // ── List tickets (admin) ──────────────────────────────────────────────────────
 
 async function listTickets({ status, search, page = 1, limit = 20 } = {}) {
@@ -131,11 +200,16 @@ async function addReply(ticketId, { senderId, body, isStaff = true }) {
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [ticketId, senderId, body, isStaff],
   );
-  // Update ticket timestamp + set to IN_PROGRESS if still OPEN
+  // Update ticket timestamp + set to IN_PROGRESS if still OPEN (staff reply)
+  // For customer replies, set status back to OPEN and update timestamp
   await pool.query(
     `UPDATE support_tickets
      SET updated_at = NOW(),
-         status = CASE WHEN status = 'OPEN' AND $1 = true THEN 'IN_PROGRESS' ELSE status END
+         status = CASE 
+           WHEN $1 = true AND status = 'OPEN' THEN 'IN_PROGRESS'
+           WHEN $1 = false THEN 'OPEN'
+           ELSE status 
+         END
      WHERE id = $2`,
     [isStaff, ticketId],
   );
@@ -154,4 +228,4 @@ async function updateStatus(ticketId, status) {
   if (rowCount === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
 }
 
-module.exports = { listTickets, getTicket, addReply, updateStatus };
+module.exports = { listTickets, getTicket, addReply, updateStatus, createTicket, getCustomerTickets };

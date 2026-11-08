@@ -7,9 +7,15 @@ const {
   getPassword,
   resetPassword,
   blockCustomer,
+  getProfile,
+  updateProfile,
 } = require('./customers.controller');
 
 const router = Router();
+
+// Mount /me endpoints before parameterized /:id routes
+router.get('/me',                 authenticate, getProfile);
+router.patch('/me',               authenticate, updateProfile);
 
 router.get('/',                 authenticate, getCustomers);
 router.get('/:id',              authenticate, getCustomerById);
