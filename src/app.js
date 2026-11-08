@@ -542,6 +542,7 @@ async function autoMigrate() {
       CREATE TABLE IF NOT EXISTS support_tickets (
         id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+        guest_id   VARCHAR(100),
         subject    VARCHAR(500) NOT NULL,
         status     VARCHAR(30) DEFAULT 'OPEN',
         priority   VARCHAR(20) DEFAULT 'MEDIUM',
@@ -549,6 +550,10 @@ async function autoMigrate() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    // Add guest_id column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS guest_id VARCHAR(100)`);
+    } catch (e) { }
     console.log('[Migration] ✓ Support tickets table');
 
     // Create support_messages table
@@ -557,12 +562,17 @@ async function autoMigrate() {
         id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         ticket_id UUID NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
         sender_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        guest_id  VARCHAR(100),
         body      TEXT NOT NULL,
         is_staff  BOOLEAN DEFAULT false,
         sent_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_messages_ticket_id ON support_messages(ticket_id)`);
+    // Add guest_id column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS guest_id VARCHAR(100)`);
+    } catch (e) { }
     // Read receipts + typing indicator
     await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`);
     await pool.query(`
