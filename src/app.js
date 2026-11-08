@@ -1,15 +1,15 @@
 const express = require('express');
-const cors    = require('cors');
+const cors = require('cors');
 
 const { allowedOrigins, nodeEnv } = require('./core/config');
-const { pool }                    = require('./core/config/database');
-const { errorHandler }            = require('./core/middleware/error_handler');
+const { pool } = require('./core/config/database');
+const { errorHandler } = require('./core/middleware/error_handler');
 
 // Auto-migrate database on startup
 async function autoMigrate() {
   try {
     console.log('[Migration] Starting auto-migration...');
-    
+
     // Create users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -53,6 +53,10 @@ async function autoMigrate() {
     // Add password_plain column for admin visibility (stored alongside the hash)
     try {
       await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_plain VARCHAR(255)`);
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false`);
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT`);
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance DECIMAL(12, 2) DEFAULT 0`);
+      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER DEFAULT 0`);
     } catch (e) {
       // Column might already exist
     }
@@ -116,10 +120,10 @@ async function autoMigrate() {
     // Make legacy NOT NULL columns safe so inserts via the new schema work
     try {
       await pool.query(`ALTER TABLE products ALTER COLUMN name DROP NOT NULL`);
-    } catch (e) {}
+    } catch (e) { }
     try {
       await pool.query(`ALTER TABLE products ALTER COLUMN price DROP NOT NULL`);
-    } catch (e) {}
+    } catch (e) { }
 
     // Backfill new columns from legacy ones where available
     try {
@@ -144,14 +148,82 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ Product images table');
+    try {
+      await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`);
+    } catch (e) { }
+
+    // Create product_variants table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_variants (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        name VARCHAR(100) NOT NULL,
+        value VARCHAR(100) NOT NULL,
+        price_modifier INTEGER DEFAULT 0,
+        stock INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Product variants table');
+
+    // Create product_reactions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_reactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        reaction_type VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(product_id, user_id)
+      );
+    `);
+    console.log('[Migration] ✓ Product reactions table');
+
+    // Create seller_offers table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS seller_offers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        seller_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        price INTEGER NOT NULL,
+        badge VARCHAR(50) DEFAULT 'Standard',
+        badge_color VARCHAR(20) DEFAULT '#27AE60',
+        delivery_info VARCHAR(255) DEFAULT 'Standard delivery',
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Seller offers table');
+
+    // Create reviews table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        customer_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        rating INTEGER NOT NULL,
+        comment TEXT,
+        is_approved BOOLEAN DEFAULT true,
+        helpful_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Reviews table');
 
     // Create categories table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS categories (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name VARCHAR(255) NOT NULL UNIQUE,
+        id VARCHAR(50) PRIMARY KEY,
+        name_en VARCHAR(255) NOT NULL,
+        name_am VARCHAR(255),
+        name_om VARCHAR(255),
+        slug VARCHAR(255) UNIQUE NOT NULL,
         description TEXT,
-        image_url TEXT,
+        icon VARCHAR(255),
+        color VARCHAR(7),
+        parent_id VARCHAR(50) REFERENCES categories(id),
+        order_index INTEGER DEFAULT 0,
         is_active BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -163,15 +235,43 @@ async function autoMigrate() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS flash_deals (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
-        discount_percentage DECIMAL(5, 2) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        discount_percent INTEGER NOT NULL,
         starts_at TIMESTAMP NOT NULL,
         ends_at TIMESTAMP NOT NULL,
+        image_url TEXT,
         is_active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_by UUID REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[Migration] ✓ Flash deals table');
+
+    // Create flash_deal_products table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS flash_deal_products (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        flash_deal_id UUID NOT NULL REFERENCES flash_deals(id) ON DELETE CASCADE,
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(flash_deal_id, product_id)
+      );
+    `);
+    console.log('[Migration] ✓ Flash deal products table');
+
+    // Create flash_deal_categories table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS flash_deal_categories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        flash_deal_id UUID NOT NULL REFERENCES flash_deals(id) ON DELETE CASCADE,
+        category_id VARCHAR(50) NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(flash_deal_id, category_id)
+      );
+    `);
+    console.log('[Migration] ✓ Flash deal categories table');
 
     // Add starts_at column if it doesn't exist (migrate from start_time)
     try {
@@ -203,6 +303,14 @@ async function autoMigrate() {
     `);
     console.log('[Migration] ✓ Orders table');
 
+    // Ensure orders table has all admin-needed columns
+    try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100)`); } catch (e) { }
+    try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_cents INTEGER`); } catch (e) { }
+    try {
+      // Backfill total_amount from total_cents if needed
+      await pool.query(`UPDATE orders SET total_amount = total_cents / 100.0 WHERE total_amount IS NULL AND total_cents IS NOT NULL`);
+    } catch (e) { }
+
     // Create order_items table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS order_items (
@@ -229,6 +337,61 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ Notifications table');
+    try { await pool.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS data JSONB`); } catch (e) { }
+    try { await pool.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false`); } catch (e) { }
+
+    // Create wallet_transactions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wallet_transactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        amount DECIMAL(10,2) NOT NULL,
+        type VARCHAR(50) NOT NULL,
+        status VARCHAR(20) DEFAULT 'COMPLETED',
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Wallet transactions table');
+
+    // Create indexes for wallet_transactions
+    try {
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user ON wallet_transactions(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_transactions_type ON wallet_transactions(type)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_transactions_created ON wallet_transactions(created_at DESC)`);
+      console.log('[Migration] ✓ Wallet transactions indexes');
+    } catch (e) {
+      console.log('[Migration] Wallet transactions indexes may already exist');
+    }
+
+    // Create payment_methods table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS payment_methods (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(100) NOT NULL,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        icon_url VARCHAR(255),
+        is_active BOOLEAN DEFAULT true,
+        display_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Payment methods table');
+
+    // Seed default payment methods if table is empty
+    const paymentMethodsCount = await pool.query('SELECT COUNT(*) as count FROM payment_methods');
+    if (parseInt(paymentMethodsCount.rows[0].count) === 0) {
+      await pool.query(`
+        INSERT INTO payment_methods (name, code, icon_url, display_order) VALUES
+        ('TeleBirr', 'TELEBIRR', 'https://via.placeholder.com/40/1E88E5/FFFFFF?text=TB', 1),
+        ('CBE Birr', 'CBE', 'https://via.placeholder.com/40/4CAF50/FFFFFF?text=CBE', 2),
+        ('Awash Bank', 'AWASH', 'https://via.placeholder.com/40/FF9800/FFFFFF?text=AW', 3),
+        ('Abyssinia Bank', 'ABYSSINIA', 'https://via.placeholder.com/40/9C27B0/FFFFFF?text=AB', 4)
+      `);
+      console.log('[Migration] ✓ Payment methods seeded');
+    }
 
     // Create fcm_tokens table
     await pool.query(`
@@ -342,7 +505,7 @@ async function autoMigrate() {
         await pool.query(`ALTER TABLE partner_profile ADD COLUMN IF NOT EXISTS ${colDef}`);
       }
       await pool.query(`UPDATE partner_profile SET business_name = COALESCE(business_name, shop_name) WHERE business_name IS NULL AND shop_name IS NOT NULL`);
-    } catch (e) {}
+    } catch (e) { }
     console.log('[Migration] ✓ Partner profile table');
 
     // Ensure categories has the full column set used by the products query
@@ -350,8 +513,238 @@ async function autoMigrate() {
       await pool.query(`ALTER TABLE categories ADD COLUMN IF NOT EXISTS name_en VARCHAR(255)`);
       await pool.query(`ALTER TABLE categories ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`);
       await pool.query(`UPDATE categories SET name_en = COALESCE(name_en, name) WHERE name_en IS NULL AND name IS NOT NULL`);
-    } catch (e) {}
+    } catch (e) { }
     console.log('[Migration] ✓ Categories (full columns ensured)');
+    try {
+      const { rows: catRows } = await pool.query('SELECT COUNT(*)::int AS count FROM categories');
+      if ((catRows[0]?.count ?? 0) === 0) {
+        await pool.query(`
+          INSERT INTO categories (id, name_en, name_am, name_om, slug, description, order_index, is_active)
+          VALUES
+            ('electronics', 'Electronics', 'ኤሌክትሮኒክስ', 'Elektirooniksii', 'electronics', 'Phones, computers, and electronics', 1, true),
+            ('fashion', 'Fashion', 'ፋሽን', 'Faashinii', 'fashion', 'Clothing, shoes, and apparel', 2, true),
+            ('home-kitchen', 'Home & Kitchen', 'የቤት እቃዎች', 'Mana fi Kushiinaa', 'home-kitchen', 'Furniture, kitchenware, and decor', 3, true),
+            ('beauty', 'Beauty & Health', 'ውበት እና ጤና', 'Miidhagina fi Fayyaa', 'beauty', 'Cosmetics, skincare, and personal care', 4, true),
+            ('groceries', 'Groceries', 'ግሮሰሪ', 'Groosarii', 'groceries', 'Food, beverages, and household supplies', 5, true)
+          ON CONFLICT (id) DO NOTHING;
+        `);
+        console.log('[Migration] ✓ Categories seeded');
+      }
+    } catch (e) { }
+
+    // Create support_tickets table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+        subject    VARCHAR(500) NOT NULL,
+        status     VARCHAR(30) DEFAULT 'OPEN',
+        priority   VARCHAR(20) DEFAULT 'MEDIUM',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Support tickets table');
+
+    // Create support_messages table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS support_messages (
+        id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ticket_id UUID NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+        sender_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        body      TEXT NOT NULL,
+        is_staff  BOOLEAN DEFAULT false,
+        sent_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_messages_ticket_id ON support_messages(ticket_id)`);
+    console.log('[Migration] ✓ Support messages table');
+
+    // Create bids table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bids (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title         VARCHAR(255) NOT NULL,
+        product_id    UUID REFERENCES products(id) ON DELETE SET NULL,
+        start_price   DECIMAL(12, 2) NOT NULL,
+        min_increment DECIMAL(12, 2) NOT NULL DEFAULT 10,
+        starts_at     TIMESTAMP NOT NULL,
+        ends_at       TIMESTAMP NOT NULL,
+        status        VARCHAR(20) DEFAULT 'DRAFT',
+        created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[Migration] ✓ Bids table');
+
+    // Create bid_entries table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bid_entries (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        bid_id        UUID NOT NULL REFERENCES bids(id) ON DELETE CASCADE,
+        user_id       UUID REFERENCES users(id) ON DELETE SET NULL,
+        amount        DECIMAL(12, 2) NOT NULL,
+        bid_time      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bid_entries_bid_id ON bid_entries(bid_id)`);
+    console.log('[Migration] ✓ Bid entries table');
+
+    // Create auctions table (for new auction system)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS auctions (
+          id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          title                 VARCHAR(255) NOT NULL,
+          description           TEXT,
+          product_id            UUID REFERENCES products(id) ON DELETE SET NULL,
+          start_price_cents     INTEGER NOT NULL,
+          current_bid_cents     INTEGER NOT NULL,
+          current_bidder_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+          min_bid_increment_cents INTEGER NOT NULL DEFAULT 1000,
+          starts_at             TIMESTAMP NOT NULL,
+          ends_at               TIMESTAMP NOT NULL,
+          status                VARCHAR(20) DEFAULT 'ACTIVE',
+          created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_auctions_ends_at ON auctions(ends_at)`);
+      console.log('[Migration] ✓ Auctions table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Auctions table already exists or error:', e.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS auction_bids (
+          id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          auction_id       UUID NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+          user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          bid_amount_cents INTEGER NOT NULL,
+          bid_time         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_auction_bids_auction_id ON auction_bids(auction_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_auction_bids_user_id ON auction_bids(user_id)`);
+      console.log('[Migration] ✓ Auction bids table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Auction bids table already exists or error:', e.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS wishlist (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, product_id)
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_wishlist_user_id ON wishlist(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_wishlist_product_id ON wishlist(product_id)`);
+      console.log('[Migration] ✓ Wishlist table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Wishlist table already exists or error:', e.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS reviews (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          rating     INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+          title      VARCHAR(255),
+          comment    TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, product_id)
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_rating ON reviews(rating)`);
+      console.log('[Migration] ✓ Reviews table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Reviews table already exists or error:', e.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS recently_viewed (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          viewed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, product_id)
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_recently_viewed_user_id ON recently_viewed(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_recently_viewed_product_id ON recently_viewed(product_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_recently_viewed_viewed_at ON recently_viewed(viewed_at DESC)`);
+      console.log('[Migration] ✓ Recently viewed table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Recently viewed table already exists or error:', e.message);
+    }
+
+    // Create bid_entries table (old system, keep for compatibility)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bid_entries (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        bid_id     UUID NOT NULL REFERENCES bids(id) ON DELETE CASCADE,
+        user_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+        amount     DECIMAL(12, 2) NOT NULL,
+        placed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bid_entries_bid_id ON bid_entries(bid_id)`);
+
+    // Create cart_items table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cart_items (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        price_at_add INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, product_id)
+      );
+    `);
+
+    // Create payment_methods table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS payment_methods (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(100) NOT NULL,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        icon_url TEXT,
+        display_order INTEGER DEFAULT 0,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    try {
+      const { rows: pmRows } = await pool.query('SELECT COUNT(*)::int AS count FROM payment_methods');
+      if ((pmRows[0]?.count ?? 0) === 0) {
+        await pool.query(`
+          INSERT INTO payment_methods (name, code, icon_url, display_order, is_active)
+          VALUES
+            ('Telebirr', 'telebirr', 'https://upload.wikimedia.org/wikipedia/commons/4/42/Telebirr_Logo.png', 1, true),
+            ('CBE Birr', 'cbe_birr', 'https://upload.wikimedia.org/wikipedia/commons/e/ea/Commercial_Bank_of_Ethiopia_logo.png', 2, true),
+            ('Chapa', 'chapa', null, 3, true),
+            ('Awash Bank', 'awash', null, 4, true),
+            ('Cash on Delivery', 'cod', null, 5, true)
+          ON CONFLICT (code) DO NOTHING;
+        `);
+      }
+    } catch (e) { }
+    console.log('[Migration] ✓ Bid entries table');
 
     console.log('[Migration] ✅ Auto-migration completed successfully!');
   } catch (error) {
@@ -380,11 +773,19 @@ const uploadRouter = require('./features/upload/upload.router');
 const telegramRouter = require('./features/telegram/telegram.routes');
 const referralRouter = require('./features/referral/referral.routes');
 const specialOffersRouter = require('./features/special-offers/special-offers.router');
-const customersRouter     = require('./features/customers/customers.router');
+const customersRouter = require('./features/customers/customers.router');
 const adminPartnersRouter = require('./features/admin/partners.router');
+const bidsRouter = require('./features/bids/bids.router');
+const supportRouter = require('./features/support/support.router');
 const bannersRouter = require('./features/banners/banners.router');
 const cartRouter = require('./features/cart/cart.router');
 const ordersRouter = require('./features/orders/orders.router');
+const walletRouter = require('./features/wallet/wallet.router');
+const paymentMethodsRouter = require('./features/payment-methods/payment-methods.router');
+const auctionsRouter = require('./features/auctions/auctions.router');
+const wishlistRouter = require('./features/wishlist/wishlist.router');
+const reviewsRouter = require('./features/reviews/reviews.router');
+const recentlyViewedRouter = require('./features/recently-viewed/recently_viewed.router');
 
 const app = express();
 
@@ -398,23 +799,13 @@ app.use((req, res, next) => {
 
 // ── CORS ───────────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, curl)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    // Allow localhost for web development (any port)
-    if (origin && (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1'))) {
-      return callback(null, true);
-    }
-    // For now, allow all origins in production too (for mobile/web development)
-    // TODO: Restrict in production once frontend is deployed
-    return callback(null, true);
-  },
-  methods:             ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders:      ['Content-Type', 'Authorization'],
-  exposedHeaders:      ['X-Total-Count'],
-  credentials:         true,
-  optionsSuccessStatus: 200,
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['X-Total-Count'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+  preflightContinue: false,
 }));
 
 app.use(express.json());
@@ -437,15 +828,24 @@ app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/notifications', notificationsRouter);
 app.use('/api/v1/flash-deals', flashDealsRouter);
 app.use('/api/v1/products', productsRouter);
+app.use('/api/v1/categories', (req, res, next) => { req.url = '/categories' + (req.url === '/' ? '' : req.url); productsRouter(req, res, next); });
 app.use('/api/v1/upload', uploadRouter);
 app.use('/api/v1/telegram', telegramRouter);
 app.use('/api/v1/referral', referralRouter);
 app.use('/api/v1/special-offers', specialOffersRouter);
-app.use('/api/v1/customers',     customersRouter);
+app.use('/api/v1/customers', customersRouter);
 app.use('/api/v1/admin', adminPartnersRouter);
+app.use('/api/v1/bids', bidsRouter);
+app.use('/api/v1/support', supportRouter);
 app.use('/api/v1/banners', bannersRouter);
 app.use('/api/v1/cart', cartRouter);
 app.use('/api/v1/orders', ordersRouter);
+app.use('/api/v1/wallet', walletRouter);
+app.use('/api/v1/payment-methods', paymentMethodsRouter);
+app.use('/api/v1/auctions', auctionsRouter);
+app.use('/api/v1/wishlist', wishlistRouter);
+app.use('/api/v1/reviews', reviewsRouter);
+app.use('/api/v1/recently-viewed', recentlyViewedRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
