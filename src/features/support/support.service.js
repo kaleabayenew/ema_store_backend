@@ -93,6 +93,19 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
 
 // ── Get customer tickets ──────────────────────────────────────────────────────
 
+/** Attach a guest's tickets/messages to a user account (after login). */
+async function claimGuestTickets(userId, guestId) {
+  if (!userId || !guestId) return;
+  await pool.query(
+    `UPDATE support_tickets SET user_id = $1 WHERE guest_id = $2 AND user_id IS NULL`,
+    [userId, guestId],
+  );
+  await pool.query(
+    `UPDATE support_messages SET sender_id = $1 WHERE guest_id = $2 AND sender_id IS NULL AND is_staff = false`,
+    [userId, guestId],
+  );
+}
+
 async function getCustomerTickets(userId, guestId) {
   const conds = [];
   const params = [];
@@ -574,6 +587,7 @@ module.exports = {
   updateStatus,
   createTicket,
   getCustomerTickets,
+  claimGuestTickets,
   getSupportSettings,
   updateSupportSettings,
   listDefaultMessages,
