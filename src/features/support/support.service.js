@@ -134,11 +134,18 @@ async function getCustomerTickets(userId, guestId) {
 
 // ── List tickets (admin) ──────────────────────────────────────────────────────
 
-async function listTickets({ status, search, page = 1, limit = 20 } = {}) {
+async function listTickets({ status, search, page = 1, limit = 20, userId, isAdmin } = {}) {
   const offset = (page - 1) * limit;
   const params = [];
   let where = 'WHERE 1=1';
   let idx = 1;
+
+  // Non-admin staff only see their assigned tickets
+  if (!isAdmin) {
+    where += ` AND (t.assigned_to = $${idx} OR t.assigned_to IS NULL)`;
+    params.push(userId);
+    idx++;
+  }
 
   if (status) {
     where += ` AND t.status = $${idx}`;
@@ -293,7 +300,7 @@ async function getTicket(id) {
 
 async function addReply(ticketId, { senderId, guestId, body, imageUrl, isStaff = false }) {
   const { rows: tRows } = await pool.query(
-    `SELECT id, status, user_id, guest_id FROM support_tickets WHERE id = $1`, [ticketId],
+    `SELECT id, status, user_id, guest_id, assigned_to FROM support_tickets WHERE id = $1`, [ticketId],
   );
   if (tRows.length === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
   const ticket = tRows[0];
@@ -306,6 +313,10 @@ async function addReply(ticketId, { senderId, guestId, body, imageUrl, isStaff =
     if (ticket.status === 'CLOSED') throw new AppError('This ticket is closed', 400, 'TICKET_CLOSED');
   }
   // Staff (admins, super admins, customer support) can reply to any ticket
+  // Auto-assign to staff if ticket is unassigned
+  if (isStaff && senderId && !ticket.assigned_to) {
+    await pool.query(`UPDATE support_tickets SET assigned_to = $1 WHERE id = $2`, [senderId, ticketId]);
+  }
 
   const { rows } = await pool.query(
     `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, image_url, is_staff)
