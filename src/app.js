@@ -593,6 +593,34 @@ async function autoMigrate() {
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_guest_id ON support_tickets (guest_id)`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_user_id ON support_tickets (user_id)`);
       console.log('[Migration] ✓ Support typing table');
+
+      // ── One-time cleanup: merge duplicate open guest tickets into the newest one ──
+      try {
+        await pool.query(`
+          WITH ranked AS (
+            SELECT id, guest_id,
+                   FIRST_VALUE(id) OVER (PARTITION BY guest_id ORDER BY updated_at DESC) AS keep_id
+            FROM support_tickets
+            WHERE guest_id IS NOT NULL AND user_id IS NULL AND status <> 'CLOSED'
+          )
+          UPDATE support_messages m
+          SET ticket_id = r.keep_id
+          FROM ranked r
+          WHERE m.ticket_id = r.id AND r.id <> r.keep_id;
+
+          DELETE FROM support_tickets t
+          USING (
+            SELECT id,
+                   FIRST_VALUE(id) OVER (PARTITION BY guest_id ORDER BY updated_at DESC) AS keep_id
+            FROM support_tickets
+            WHERE guest_id IS NOT NULL AND user_id IS NULL AND status <> 'CLOSED'
+          ) r
+          WHERE t.id = r.id AND r.id <> r.keep_id;
+        `);
+        console.log('[Migration] ✓ Cleaned up duplicate guest support tickets');
+      } catch (cleanErr) {
+        console.warn('[Migration] Guest tickets cleanup notice:', cleanErr.message);
+      }
     } catch (e) {
       console.log('[Migration] Support typing table error:', e.message);
     }
