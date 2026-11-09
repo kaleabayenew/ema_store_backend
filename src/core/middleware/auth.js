@@ -75,14 +75,16 @@ const adminOnly = (req, _res, next) => {
 /**
  * requireStaff — Express middleware that checks if user has any staff role.
  * Staff roles: ADMIN, SUPER_ADMIN, CUSTOMER_SUPPORT, MANAGER
+ * Also checks adminRole field from admin_user table.
  */
 const requireStaff = (req, _res, next) => {
   if (!req.user) {
     console.log('[requireStaff] No req.user found');
     return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
   }
-  const role = String(req.user.role || '').toUpperCase();
-  console.log('[requireStaff] User role:', role);
+  // Check adminRole first (from admin_user table), then fall back to role
+  const role = String(req.user.adminRole || req.user.role || '').toUpperCase();
+  console.log('[requireStaff] User role:', role, '(adminRole:', req.user.adminRole, 'role:', req.user.role, ')');
   const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
   if (!staffRoles.includes(role)) {
     console.log('[requireStaff] Role not in staffRoles:', staffRoles);
@@ -94,14 +96,21 @@ const requireStaff = (req, _res, next) => {
 
 /**
  * requireSuperAdmin — Express middleware that checks if user has SUPER_ADMIN role.
+ * Checks both adminRole (from admin_user table) and role (from users table).
  */
 const requireSuperAdmin = (req, _res, next) => {
   if (!req.user) {
+    console.log('[requireSuperAdmin] No req.user found');
     return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
   }
-  if (req.user.role !== 'SUPER_ADMIN') {
+  // Check adminRole first (from admin_user table), then fall back to role
+  const role = String(req.user.adminRole || req.user.role || '').toUpperCase();
+  console.log('[requireSuperAdmin] User role:', role, '(adminRole:', req.user.adminRole, 'role:', req.user.role, ')');
+  if (role !== 'SUPER_ADMIN') {
+    console.log('[requireSuperAdmin] Role is not SUPER_ADMIN');
     return next(new AppError('Super Admin access required.', 403, 'SUPER_ADMIN_ONLY'));
   }
+  console.log('[requireSuperAdmin] Access granted');
   next();
 };
 
