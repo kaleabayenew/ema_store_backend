@@ -10,12 +10,16 @@ const requireAuth = async (req, _res, next) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
 
+  console.log('[requireAuth] Authorization header:', header ? 'Present' : 'Missing');
+  console.log('[requireAuth] Token:', token ? `${token.substring(0, 20)}...` : 'None');
+
   if (!token) {
     return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
   }
 
   try {
     const decoded = verifyToken(token);
+    console.log('[requireAuth] Decoded token:', decoded);
     req.user = decoded;
 
     if (decoded && decoded.id) {
@@ -38,6 +42,7 @@ const requireAuth = async (req, _res, next) => {
 
     next();
   } catch (err) {
+    console.log('[requireAuth] Error:', err.message);
     next(err); // JsonWebTokenError / TokenExpiredError — handled by errorHandler
   }
 };
@@ -73,13 +78,17 @@ const adminOnly = (req, _res, next) => {
  */
 const requireStaff = (req, _res, next) => {
   if (!req.user) {
+    console.log('[requireStaff] No req.user found');
     return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
   }
   const role = String(req.user.role || '').toUpperCase();
+  console.log('[requireStaff] User role:', role);
   const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
   if (!staffRoles.includes(role)) {
+    console.log('[requireStaff] Role not in staffRoles:', staffRoles);
     return next(new AppError('Staff access required.', 403, 'STAFF_ONLY'));
   }
+  console.log('[requireStaff] Access granted');
   next();
 };
 
