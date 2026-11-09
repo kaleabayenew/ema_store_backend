@@ -575,16 +575,20 @@ async function autoMigrate() {
     } catch (e) { }
     // Read receipts + typing indicator
     await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`);
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS support_typing (
-        ticket_id UUID NOT NULL,
-        user_id   UUID,
-        is_staff  BOOLEAN NOT NULL,
-        typed_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        PRIMARY KEY (ticket_id, user_id)
-      )
-    `);
-    console.log('[Migration] ✓ Support messages table');
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS support_typing (
+          ticket_id UUID NOT NULL,
+          user_id   UUID,
+          is_staff  BOOLEAN NOT NULL,
+          typed_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          PRIMARY KEY (ticket_id, user_id)
+        )
+      `);
+      console.log('[Migration] ✓ Support typing table');
+    } catch (e) {
+      console.log('[Migration] Support typing table already exists or error:', e.message);
+    }
 
     // Create bids table
     await pool.query(`
