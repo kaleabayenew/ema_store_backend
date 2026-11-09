@@ -33,7 +33,7 @@ function isStaffUser(user) {
 function getGuestId(req) {
   const raw = req.body?.guestId || req.query?.guestId || req.headers['x-guest-id'] || req.headers['x-device-id'];
   const id = typeof raw === 'string' ? raw.trim() : '';
-  return id ? id.slice(0, 128) : null;
+  return id ? id.slice(0, 100) : null; // column is VARCHAR(100)
 }
 
 // ── Tickets ───────────────────────────────────────────────────────────────────
@@ -57,6 +57,11 @@ async function reply(req, res, next) {
   try {
     const body = req.body?.body;
     if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
+
+    // A token was sent but not understood: do not silently treat an admin as a guest.
+    if (req.headers.authorization && !req.user) {
+      return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+    }
 
     const staff = isStaffUser(req.user);
     const guestId = staff ? null : getGuestId(req);
@@ -194,7 +199,7 @@ async function markRead(req, res, next) {
 
 async function setTyping(req, res, next) {
   try {
-    await recordTyping(req.params.id, { userId: req.user?.id || null, isStaff: isStaffUser(req.user) });
+    await recordTyping(req.params.id, { isStaff: isStaffUser(req.user) });
     ok(res, { message: 'Typing recorded' });
   } catch (e) { next(e); }
 }
