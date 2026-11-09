@@ -291,7 +291,7 @@ async function login({ phone, email, password }) {
     throw new AppError('Incorrect password. Please try again.', 401, 'WRONG_PASSWORD');
   }
 
-  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.role, adminRole: user.admin_role });
+  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.adminRole || user.role, adminRole: user.admin_role });
   console.log('[Auth Service] Token generated successfully');
   return {
     token,
@@ -351,7 +351,7 @@ async function _buildAuthResponse(canonicalPhone) {
   const user = rows[0];
   if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
 
-  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.role, adminRole: user.admin_role });
+  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.adminRole || user.role, adminRole: user.admin_role });
   return {
     token,
     user: {
