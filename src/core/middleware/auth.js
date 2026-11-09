@@ -67,4 +67,33 @@ const adminOnly = (req, _res, next) => {
   next();
 };
 
-module.exports = { requireAuth, authenticate: requireAuth, optionalAuth, adminOnly };
+/**
+ * requireStaff — Express middleware that checks if user has any staff role.
+ * Staff roles: ADMIN, SUPER_ADMIN, CUSTOMER_SUPPORT, MANAGER
+ */
+const requireStaff = (req, _res, next) => {
+  if (!req.user) {
+    return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
+  }
+  const role = String(req.user.role || '').toUpperCase();
+  const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
+  if (!staffRoles.includes(role)) {
+    return next(new AppError('Staff access required.', 403, 'STAFF_ONLY'));
+  }
+  next();
+};
+
+/**
+ * requireSuperAdmin — Express middleware that checks if user has SUPER_ADMIN role.
+ */
+const requireSuperAdmin = (req, _res, next) => {
+  if (!req.user) {
+    return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
+  }
+  if (req.user.role !== 'SUPER_ADMIN') {
+    return next(new AppError('Super Admin access required.', 403, 'SUPER_ADMIN_ONLY'));
+  }
+  next();
+};
+
+module.exports = { requireAuth, authenticate: requireAuth, optionalAuth, adminOnly, requireStaff, requireSuperAdmin };
