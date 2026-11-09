@@ -46,7 +46,7 @@ function isStaffUser(user) {
 
 /** Stable guest identity sent by the app (device id). Body, query or header. */
 function getGuestId(req) {
-  const raw = req.body?.guestId || req.query?.guestId || req.headers['x-guest-id'] || req.headers['x-device-id'];
+  const raw = req?.body?.guestId || req?.query?.guestId || req?.headers?.['x-guest-id'] || req?.headers?.['x-device-id'];
   const id = typeof raw === 'string' ? raw.trim() : '';
   return id ? id.slice(0, 100) : null; // column is VARCHAR(100)
 }
@@ -56,7 +56,16 @@ function getGuestId(req) {
 async function getTickets(req, res, next) {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
-    const result = await listTickets({ status, search, page: parseInt(page), limit: parseInt(limit) });
+    const user = req.user;
+    const isAdmin = user && (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN');
+    const result = await listTickets({ 
+      status, 
+      search, 
+      page: parseInt(page), 
+      limit: parseInt(limit),
+      userId: user?.id,
+      isAdmin 
+    });
     ok(res, result);
   } catch (e) { next(e); }
 }
@@ -229,15 +238,10 @@ async function getStaffUsers(req, res, next) {
 
 async function markRead(req, res, next) {
   try {
-    // Ownership check: only ticket owner or staff can mark as read
     const staff = isStaffUser(req.user);
-    if (!staff) {
-      // Customer/guest must own the ticket
-      const guestId = getGuestId(req);
-      // The service layer will handle ownership check
-    }
+    const guestId = getGuestId(req);
     // Staff reading -> marks customer messages read. Customer/guest reading -> marks staff messages read.
-    await markMessagesRead(req.params.id, { byStaff: staff, userId: req.user?.id, guestId: getGuestId() });
+    await markMessagesRead(req.params.id, { byStaff: staff, userId: req.user?.id, guestId });
     ok(res, { message: 'Marked as read' });
   } catch (e) { next(e); }
 }
@@ -245,8 +249,9 @@ async function markRead(req, res, next) {
 async function setTyping(req, res, next) {
   try {
     const staff = isStaffUser(req.user);
+    const guestId = getGuestId(req);
     // Staff can type on any ticket, customers only on their own
-    await recordTyping(req.params.id, { isStaff: staff, userId: req.user?.id, guestId: getGuestId() });
+    await recordTyping(req.params.id, { isStaff: staff, userId: req.user?.id, guestId });
     ok(res, { message: 'Typing recorded' });
   } catch (e) { next(e); }
 }
