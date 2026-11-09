@@ -1040,12 +1040,20 @@ app.use((req, res, next) => {
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-guest-id', 'X-Device-Id'],
   exposedHeaders: ['X-Total-Count'],
   credentials: false,
   optionsSuccessStatus: 204,
   preflightContinue: false,
 }));
+
+// Explicit OPTIONS handler for all routes
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-guest-id, X-Device-Id');
+  res.status(204).send();
+});
 
 app.use(express.json());
 
@@ -1054,6 +1062,15 @@ app.use('/uploads', express.static('public/uploads'));
 
 // ── Health ─────────────────────────────────────────────────────────────────────
 app.get('/health', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.status(200).json({ status: 'ok', environment: nodeEnv, database: 'connected' });
+  } catch {
+    res.status(503).json({ status: 'error', database: 'not connected' });
+  }
+});
+
+app.get('/api/v1/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
     res.status(200).json({ status: 'ok', environment: nodeEnv, database: 'connected' });
