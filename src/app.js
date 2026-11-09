@@ -1,9 +1,12 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 
-const { allowedOrigins, nodeEnv } = require('./core/config');
+const { allowedOrigins, isOriginAllowed, nodeEnv, trustProxy, isProduction } = require('./core/config');
 const { pool } = require('./core/config/database');
 const { errorHandler } = require('./core/middleware/error_handler');
+const { createRateLimiter } = require('./core/middleware/rate_limiter');
+const { cleanupExpiredTokens } = require('./features/auth/token.service');
 
 // Auto-migrate database on startup
 async function autoMigrate() {
@@ -1055,10 +1058,27 @@ const aboutRouter = require('./features/about/about.router');
 const app = express();
 
 app.disable('x-powered-by');
+// Real client IPs for rate limiters when behind Render/nginx.
+app.set('trust proxy', trustProxy);
 
-// ── CORS — must be FIRST so OPTIONS preflight is handled before anything else ──
+// ── Security headers ───────────────────────────────────────────────────────────
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // JSON API — no HTML to protect
+    hsts: isProduction
+      ? { maxAge: 15552000, includeSubDomains: true, preload: true }
+      : false,
+  }),
+);
+
+// ── CORS — allowlisted origins only; no Origin header (mobile apps) allowed ────
+// NOTE: 'x-bot-key' is intentionally NOT in allowedHeaders — browsers must
+// never send it; it is for server-to-server / bot use only.
 const corsOptions = {
-  origin: '*',
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed'));
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type', 'Authorization', 'X-Requested-With',
@@ -1070,17 +1090,38 @@ const corsOptions = {
   preflightContinue: false,
 };
 app.use(cors(corsOptions));
+// cors() already answers preflight OPTIONS — no app.options('*') needed
+// (that syntax throws on Express 5 / path-to-regexp v8).
 
-// ── Request logging ─────────────────────────────────────────────────────────────
+// ── Request logging — method, path and status only; no headers/body/origin ────
 app.use((req, res, next) => {
-  console.log(`[Request] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
+  if (req.path === '/health' || req.path === '/api/v1/health') return next();
+  res.on('finish', () => {
+    console.log(`[Request] ${req.method} ${req.path} -> ${res.statusCode}`);
+  });
   next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 
-// ── Static files (uploads) ───────────────────────────────────────────────────────
-app.use('/uploads', express.static('public/uploads'));
+// ── Global API rate limit: 300 req/min per IP ─────────────────────────────────
+const apiLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 300,
+  code: 'TOO_MANY_REQUESTS',
+});
+app.use('/api', apiLimiter);
+
+// ── Static files (uploads) — never serve dotfiles, indexes or HTML ─────────────
+app.use(
+  '/uploads',
+  express.static('public/uploads', {
+    dotfiles: 'deny',
+    index: false,
+    setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  }),
+);
 
 // ── Health ─────────────────────────────────────────────────────────────────────
 app.get('/health', async (_req, res) => {
@@ -1163,10 +1204,19 @@ app.get('/', (_req, res) => {
   });
 });
 
-// ── 404 ────────────────────────────────────────────────────────────────────────
-app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
+// ── 404 for unknown API paths ──────────────────────────────────────────────────
+app.use('/api', (_req, res) =>
+  res.status(404).json({ success: false, code: 'NOT_FOUND', message: 'Not found' }),
+);
 
 // ── Global error handler (must be last) ───────────────────────────────────────
 app.use(errorHandler);
+
+// ── Refresh-token housekeeping: purge rows expired >7 days ago, every 6h ──────
+setInterval(() => {
+  cleanupExpiredTokens().catch((err) =>
+    console.error('[tokens] cleanup failed:', err.code || err.name),
+  );
+}, 6 * 60 * 60 * 1000).unref();
 
 module.exports = app;
