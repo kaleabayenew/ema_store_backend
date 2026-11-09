@@ -29,8 +29,18 @@ const { uploadChatImage } = require('./support.upload');
 /** Staff = any logged-in user whose role is not CUSTOMER / PARTNER. */
 function isStaffUser(user) {
   if (!user) return false;
-  const role = String(user.role || '').toUpperCase();
-  const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
+  const role = String(user.adminRole || user.role || '').toUpperCase();
+  const staffRoles = [
+    'ADMIN',
+    'SUPER_ADMIN',
+    'CUSTOMER_SUPPORT',
+    'MANAGER',
+    'MANAGEMENT',
+    'PARTNER_MANAGER',
+    'PRODUCT_MANAGER',
+    'FINANCE',
+    'MARKETING',
+  ];
   return staffRoles.includes(role) || (role !== '' && role !== 'CUSTOMER' && role !== 'PARTNER');
 }
 
@@ -54,12 +64,12 @@ async function getTickets(req, res, next) {
 async function getOne(req, res, next) {
   try {
     const ticket = await getTicket(req.params.id);
-    
+
     // Get previous tickets for the same customer (for context)
     const userId = req.user?.id || null;
     const guestId = getGuestId(req);
     const previousTickets = await getPreviousTicketsForCustomer(userId, guestId, ticket.id);
-    
+
     ok(res, { ticket, previousTickets });
   } catch (e) { next(e); }
 }
@@ -258,10 +268,10 @@ async function uploadChatImageController(req, res, next) {
 
     // Generate a temporary message ID for the image key
     const tempMessageId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
+
     // Upload to Neon Object Storage
     const imageUrl = await saveChatImage(req.file.buffer, tempMessageId, req.file.mimetype);
-    
+
     res.status(201).json({ success: true, imageUrl, tempMessageId });
   } catch (e) { next(e); }
 }
