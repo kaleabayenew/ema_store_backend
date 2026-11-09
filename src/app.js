@@ -576,18 +576,25 @@ async function autoMigrate() {
     // Read receipts + typing indicator
     await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`);
     try {
+      // One row per ticket per side (staff / customer). Works for guests too,
+      // because it no longer depends on a user id.
       await pool.query(`
         CREATE TABLE IF NOT EXISTS support_typing (
           ticket_id UUID NOT NULL,
-          user_id   UUID,
           is_staff  BOOLEAN NOT NULL,
-          typed_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          PRIMARY KEY (ticket_id, user_id)
+          typed_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
       `);
+      // Upgrade the old (ticket_id, user_id) layout. Typing rows are short-lived, so clearing is safe.
+      await pool.query(`ALTER TABLE support_typing DROP CONSTRAINT IF EXISTS support_typing_pkey`);
+      await pool.query(`ALTER TABLE support_typing DROP COLUMN IF EXISTS user_id`);
+      await pool.query(`DELETE FROM support_typing`);
+      await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_support_typing_ticket_side ON support_typing (ticket_id, is_staff)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_guest_id ON support_tickets (guest_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_user_id ON support_tickets (user_id)`);
       console.log('[Migration] ✓ Support typing table');
     } catch (e) {
-      console.log('[Migration] Support typing table already exists or error:', e.message);
+      console.log('[Migration] Support typing table error:', e.message);
     }
 
     // Create bids table
