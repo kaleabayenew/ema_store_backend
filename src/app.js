@@ -447,6 +447,7 @@ async function autoMigrate() {
     try {
       await pool.query(`ALTER TABLE admin_user ADD COLUMN IF NOT EXISTS allowed_pages JSONB DEFAULT '[]'::jsonb`);
       await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP WITH TIME ZONE`);
+      await pool.query(`UPDATE users u SET role = au.admin_role FROM admin_user au WHERE au.user_id = u.id AND au.admin_role IS NOT NULL AND (u.role IS NULL OR u.role = 'CUSTOMER')`);
     } catch (e) { /* columns may already exist */ }
     console.log('[Migration] ✓ Admin user table');
 

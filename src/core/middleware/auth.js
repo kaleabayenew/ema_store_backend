@@ -65,53 +65,87 @@ const optionalAuth = (req, _res, next) => {
 /**
  * adminOnly — Express middleware that checks if user has admin role.
  */
-const adminOnly = (req, _res, next) => {
-  if (!req.user || req.user.role !== 'ADMIN') {
-    return next(new AppError('Admin access required.', 403, 'ADMIN_ONLY'));
+const adminOnly = (req, res, next) => {
+  const checkAdmin = () => {
+    const role = String(req.user?.adminRole || req.user?.role || '').toUpperCase();
+    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
+      return next(new AppError('Admin access required.', 403, 'ADMIN_ONLY'));
+    }
+    next();
+  };
+
+  if (!req.user) {
+    return requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      checkAdmin();
+    });
   }
-  next();
+
+  checkAdmin();
 };
 
 /**
  * requireStaff — Express middleware that checks if user has any staff role.
- * Staff roles: ADMIN, SUPER_ADMIN, CUSTOMER_SUPPORT, MANAGER
+ * Staff roles: ADMIN, SUPER_ADMIN, CUSTOMER_SUPPORT, MANAGER, MANAGEMENT, etc.
  * Also checks adminRole field from admin_user table.
  */
-const requireStaff = (req, _res, next) => {
+const requireStaff = (req, res, next) => {
+  const checkStaff = () => {
+    const role = String(req.user?.adminRole || req.user?.role || '').toUpperCase();
+    console.log('[requireStaff] User role:', role, '(adminRole:', req.user?.adminRole, 'role:', req.user?.role, ')');
+    const staffRoles = [
+      'ADMIN',
+      'SUPER_ADMIN',
+      'CUSTOMER_SUPPORT',
+      'MANAGER',
+      'MANAGEMENT',
+      'PARTNER_MANAGER',
+      'PRODUCT_MANAGER',
+      'FINANCE',
+      'MARKETING',
+    ];
+    if (!staffRoles.includes(role)) {
+      console.log('[requireStaff] Role not in staffRoles:', staffRoles);
+      return next(new AppError('Staff access required.', 403, 'STAFF_ONLY'));
+    }
+    console.log('[requireStaff] Access granted');
+    next();
+  };
+
   if (!req.user) {
-    console.log('[requireStaff] No req.user found');
-    return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
+    return requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      checkStaff();
+    });
   }
-  // Check adminRole first (from admin_user table), then fall back to role
-  const role = String(req.user.adminRole || req.user.role || '').toUpperCase();
-  console.log('[requireStaff] User role:', role, '(adminRole:', req.user.adminRole, 'role:', req.user.role, ')');
-  const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
-  if (!staffRoles.includes(role)) {
-    console.log('[requireStaff] Role not in staffRoles:', staffRoles);
-    return next(new AppError('Staff access required.', 403, 'STAFF_ONLY'));
-  }
-  console.log('[requireStaff] Access granted');
-  next();
+
+  checkStaff();
 };
 
 /**
  * requireSuperAdmin — Express middleware that checks if user has SUPER_ADMIN role.
  * Checks both adminRole (from admin_user table) and role (from users table).
  */
-const requireSuperAdmin = (req, _res, next) => {
+const requireSuperAdmin = (req, res, next) => {
+  const checkSuperAdmin = () => {
+    const role = String(req.user?.adminRole || req.user?.role || '').toUpperCase();
+    console.log('[requireSuperAdmin] User role:', role, '(adminRole:', req.user?.adminRole, 'role:', req.user?.role, ')');
+    if (role !== 'SUPER_ADMIN' && role !== 'ADMIN') {
+      console.log('[requireSuperAdmin] Role is not SUPER_ADMIN or ADMIN');
+      return next(new AppError('Super Admin access required.', 403, 'SUPER_ADMIN_ONLY'));
+    }
+    console.log('[requireSuperAdmin] Access granted');
+    next();
+  };
+
   if (!req.user) {
-    console.log('[requireSuperAdmin] No req.user found');
-    return next(new AppError('Authentication required.', 401, 'MISSING_TOKEN'));
+    return requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      checkSuperAdmin();
+    });
   }
-  // Check adminRole first (from admin_user table), then fall back to role
-  const role = String(req.user.adminRole || req.user.role || '').toUpperCase();
-  console.log('[requireSuperAdmin] User role:', role, '(adminRole:', req.user.adminRole, 'role:', req.user.role, ')');
-  if (role !== 'SUPER_ADMIN') {
-    console.log('[requireSuperAdmin] Role is not SUPER_ADMIN');
-    return next(new AppError('Super Admin access required.', 403, 'SUPER_ADMIN_ONLY'));
-  }
-  console.log('[requireSuperAdmin] Access granted');
-  next();
+
+  checkSuperAdmin();
 };
 
 module.exports = { requireAuth, authenticate: requireAuth, optionalAuth, adminOnly, requireStaff, requireSuperAdmin };
