@@ -54,12 +54,13 @@ async function setStatus(req, res, next) {
 
 async function createTicket(req, res, next) {
   try {
-    const { subject, message, priority = 'MEDIUM' } = req.body;
+    const { subject, message, priority = 'MEDIUM', guestId } = req.body;
     if (!subject?.trim() || !message?.trim()) {
       return res.status(400).json({ success: false, message: 'Subject and message are required' });
     }
     const ticket = await createTicketService({
       userId: req.user?.id || null,
+      guestId: guestId || null,
       subject: subject.trim(),
       initialMessage: message.trim(),
       priority,
@@ -77,9 +78,9 @@ async function getMyTickets(req, res, next) {
 
 async function customerReply(req, res, next) {
   try {
-    const { body } = req.body;
+    const { body, guestId } = req.body;
     if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
-    const msg = await addReply(req.params.id, { senderId: req.user?.id || null, body: body.trim(), isStaff: false });
+    const msg = await addReply(req.params.id, { senderId: req.user?.id || null, guestId: guestId || null, body: body.trim(), isStaff: false });
     ok(res, { message: msg });
   } catch (e) { next(e); }
 }

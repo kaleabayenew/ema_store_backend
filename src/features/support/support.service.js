@@ -154,7 +154,10 @@ async function getTicket(id) {
 
   const { rows: messages } = await pool.query(
     `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at,
-            COALESCE(cu.full_name, u.phone, m.guest_id, 'Admin') AS sender_name
+            CASE
+              WHEN m.is_staff = true THEN COALESCE(cu.full_name, u.phone, 'Admin')
+              ELSE COALESCE(cu.full_name, u.phone, m.guest_id, 'Customer')
+            END AS sender_name
      FROM support_messages m
      LEFT JOIN users u         ON u.id = m.sender_id
      LEFT JOIN customer_user cu ON cu.user_id = m.sender_id
@@ -210,6 +213,14 @@ async function addReply(ticketId, { senderId, guestId, body, isStaff = true }) {
       `UPDATE support_messages
        SET read_at = NULL
        WHERE ticket_id = $1 AND is_staff = false`,
+      [ticketId],
+    );
+  } else {
+    // Mark staff messages as read when customer replies (for staff to see)
+    await pool.query(
+      `UPDATE support_messages
+       SET read_at = NOW()
+       WHERE ticket_id = $1 AND is_staff = true`,
       [ticketId],
     );
   }
