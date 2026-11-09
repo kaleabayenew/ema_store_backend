@@ -545,15 +545,14 @@ async function markMessagesRead(ticketId, { byStaff = true } = {}) {
   );
 }
 
-/** Record that a user is typing on a ticket (works for guests too). */
-async function recordTyping(ticketId, { userId, isStaff }) {
+/** Record that someone is typing on a ticket (customers, guests and staff). */
+async function recordTyping(ticketId, { isStaff }) {
   try {
-    // One row per side (staff / customer) per ticket - no unique constraint needed
-    await pool.query(`DELETE FROM support_typing WHERE ticket_id = $1 AND is_staff = $2`, [ticketId, isStaff]);
     await pool.query(
-      `INSERT INTO support_typing (ticket_id, user_id, is_staff, typed_at)
-       VALUES ($1, $2, $3, NOW())`,
-      [ticketId, userId || null, isStaff],
+      `INSERT INTO support_typing (ticket_id, is_staff, typed_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (ticket_id, is_staff) DO UPDATE SET typed_at = NOW()`,
+      [ticketId, !!isStaff],
     );
   } catch (e) {
     console.error('recordTyping error:', e.message);
