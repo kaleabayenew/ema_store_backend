@@ -547,6 +547,7 @@ async function autoMigrate() {
         subject    VARCHAR(500) NOT NULL,
         status     VARCHAR(30) DEFAULT 'OPEN',
         priority   VARCHAR(20) DEFAULT 'MEDIUM',
+        assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -554,6 +555,10 @@ async function autoMigrate() {
     // Add guest_id column if it doesn't exist
     try {
       await pool.query(`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS guest_id VARCHAR(100)`);
+    } catch (e) { }
+    // Add assigned_to column if it doesn't exist
+    try {
+      await pool.query(`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES users(id) ON DELETE SET NULL`);
     } catch (e) { }
     console.log('[Migration] ✓ Support tickets table');
 
@@ -1031,22 +1036,28 @@ const app = express();
 
 app.disable('x-powered-by');
 
+// ── CORS — must be FIRST so OPTIONS preflight is handled before anything else ──
+const corsOptions = {
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 'Authorization', 'X-Requested-With',
+    'x-guest-id', 'X-Guest-Id', 'x-device-id', 'X-Device-Id',
+  ],
+  exposedHeaders: ['X-Total-Count'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+  preflightContinue: false,
+};
+app.use(cors(corsOptions));
+// Explicitly respond to ALL OPTIONS preflight requests (belt-and-suspenders)
+app.options('*', cors(corsOptions));
+
 // ── Request logging ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   console.log(`[Request] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
   next();
 });
-
-// ── CORS ───────────────────────────────────────────────────────────────────────
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-guest-id', 'X-Device-Id'],
-  exposedHeaders: ['X-Total-Count'],
-  credentials: false,
-  optionsSuccessStatus: 204,
-  preflightContinue: false,
-}));
 
 app.use(express.json());
 
@@ -1098,6 +1109,29 @@ app.use('/api/v1/reviews', reviewsRouter);
 app.use('/api/v1/recently-viewed', recentlyViewedRouter);
 app.use('/api/v1/marketing', marketingRouter);
 app.use('/api/v1/about', aboutRouter);
+
+// ── Partner routes ─────────────────────────────────────────────────────────────
+const partnerAuthRouter       = require('./features/partner/auth/auth.router');
+const partnerDashboardRouter  = require('./features/partner/dashboard/dashboard.router');
+const partnerProductsRouter   = require('./features/partner/products/products.router');
+const partnerOrdersRouter     = require('./features/partner/orders/orders.router');
+const partnerInventoryRouter  = require('./features/partner/inventory/inventory.router');
+const partnerEarningsRouter   = require('./features/partner/earnings/earnings.router');
+const partnerProfileRouter    = require('./features/partner/profile/profile.router');
+const partnerReviewsRouter    = require('./features/partner/reviews/reviews.router');
+const partnerPromotionsRouter = require('./features/partner/promotions/promotions.router');
+const partnerSettingsRouter   = require('./features/partner/settings/settings.router');
+
+app.use('/api/v1/partner/auth',       partnerAuthRouter);
+app.use('/api/v1/partner/dashboard',  partnerDashboardRouter);
+app.use('/api/v1/partner/products',   partnerProductsRouter);
+app.use('/api/v1/partner/orders',     partnerOrdersRouter);
+app.use('/api/v1/partner/inventory',  partnerInventoryRouter);
+app.use('/api/v1/partner/earnings',   partnerEarningsRouter);
+app.use('/api/v1/partner/profile',    partnerProfileRouter);
+app.use('/api/v1/partner/reviews',    partnerReviewsRouter);
+app.use('/api/v1/partner/promotions', partnerPromotionsRouter);
+app.use('/api/v1/partner/settings',   partnerSettingsRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
