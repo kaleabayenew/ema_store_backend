@@ -70,7 +70,12 @@ async function getOne(req, res, next) {
     const guestId = getGuestId(req);
     const previousTickets = await getPreviousTicketsForCustomer(userId, guestId, ticket.id);
 
-    ok(res, { ticket, previousTickets });
+    // Return both nested ticket (for web & detailed views) and flattened ticket (for flutter clients expecting messages at root)
+    ok(res, {
+      ...ticket,
+      ticket,
+      previousTickets,
+    });
   } catch (e) { next(e); }
 }
 
