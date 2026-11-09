@@ -153,7 +153,7 @@ async function getTicket(id) {
   if (rows.length === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
 
   const { rows: messages } = await pool.query(
-    `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at,
+    `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at, m.guest_id,
             CASE
               WHEN m.is_staff = true THEN COALESCE(cu.full_name, u.phone, 'Admin')
               ELSE COALESCE(cu.full_name, u.phone, m.guest_id, 'Customer')
@@ -165,6 +165,8 @@ async function getTicket(id) {
      ORDER BY m.sent_at ASC`,
     [id],
   );
+
+  console.log('📨 Messages for ticket', id, ':', messages.map(m => ({ id: m.id, is_staff: m.is_staff, sender_name: m.sender_name, guest_id: m.guest_id })));
 
   const t = rows[0];
   return {
