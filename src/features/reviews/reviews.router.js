@@ -1,25 +1,19 @@
-// src/features/reviews/reviews.router.js
-
 const express = require('express');
 const router = express.Router();
 const {
-  getProductReviews,
-  getUserReviews,
-  createReview,
-  updateReview,
-  deleteReview,
-  getProductReviewStats
+  getReviews,
+  addReview,
+  markHelpful,
 } = require('./reviews.controller');
-const { authenticate } = require('../../core/middleware/auth');
+const { requireAuth } = require('../../core/middleware/auth');
 
-// Public routes - parameterized routes must come first
-router.get('/product/:productId/stats', getProductReviewStats);
-router.get('/product/:productId', getProductReviews);
+// GET /api/v1/reviews?productId=
+router.get('/', getReviews);
 
-// Protected routes (require authentication)
-router.get('/user', authenticate, getUserReviews);
-router.post('/product/:productId', authenticate, createReview);
-router.put('/:reviewId', authenticate, updateReview);
-router.delete('/:reviewId', authenticate, deleteReview);
+// POST /api/v1/reviews
+router.post('/', requireAuth, addReview);
+
+// PATCH /api/v1/reviews/:id/helpful
+router.patch('/:id/helpful', markHelpful);
 
 module.exports = router;
