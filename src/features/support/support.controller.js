@@ -5,6 +5,7 @@ const {
   updateStatus,
   createTicket: createTicketService,
   getCustomerTickets,
+  claimGuestTickets,
   getSupportSettings: fetchSupportSettings,
   updateSupportSettings: saveSupportSettings,
   listDefaultMessages,
@@ -103,7 +104,9 @@ async function createTicket(req, res, next) {
 
 async function getMyTickets(req, res, next) {
   try {
-    const tickets = await getCustomerTickets(req.user?.id || null, getGuestId(req));
+    const guestId = getGuestId(req);
+    if (req.user?.id && guestId) await claimGuestTickets(req.user.id, guestId);
+    const tickets = await getCustomerTickets(req.user?.id || null, guestId);
     ok(res, { tickets });
   } catch (e) { next(e); }
 }
