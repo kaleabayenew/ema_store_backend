@@ -281,6 +281,7 @@ async function addReply(ticketId, { senderId, guestId, body, isStaff = false }) 
     if (!owns) throw new AppError('Not allowed to reply to this ticket', 403, 'FORBIDDEN');
     if (ticket.status === 'CLOSED') throw new AppError('This ticket is closed', 400, 'TICKET_CLOSED');
   }
+  // Staff (admins, super admins, customer support) can reply to any ticket
 
   const { rows } = await pool.query(
     `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
@@ -579,6 +580,26 @@ async function getTypingStatus(ticketId, { windowSeconds = 5 } = {}) {
   }
 }
 
+// ── Delete ticket (admin only) ───────────────────────────────────────────────────
+
+async function deleteTicket(id) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Delete messages first (cascade if FK is set, but explicit is safer)
+    await client.query('DELETE FROM support_messages WHERE ticket_id = $1', [id]);
+    // Delete the ticket
+    const { rowCount } = await client.query('DELETE FROM support_tickets WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    if (rowCount === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   listTickets,
   getTicket,
@@ -598,4 +619,5 @@ module.exports = {
   markMessagesRead,
   recordTyping,
   getTypingStatus,
+  deleteTicket,
 };

@@ -17,6 +17,7 @@ const {
   markMessagesRead,
   recordTyping,
   getTypingStatus,
+  deleteTicket,
 } = require('./support.service');
 const { ok } = require('../../core/utils/response');
 
@@ -26,7 +27,8 @@ const { ok } = require('../../core/utils/response');
 function isStaffUser(user) {
   if (!user) return false;
   const role = String(user.role || '').toUpperCase();
-  return role !== '' && role !== 'CUSTOMER' && role !== 'PARTNER';
+  const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER'];
+  return staffRoles.includes(role) || (role !== '' && role !== 'CUSTOMER' && role !== 'PARTNER');
 }
 
 /** Stable guest identity sent by the app (device id). Body, query or header. */
@@ -57,6 +59,14 @@ async function reply(req, res, next) {
   try {
     const body = req.body?.body;
     if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
+
+    // Debug logging
+    console.log('📝 Reply attempt:', {
+      user: req.user,
+      userRole: req.user?.role,
+      isStaff: isStaffUser(req.user),
+      hasAuth: !!req.headers.authorization,
+    });
 
     // A token was sent but not understood: do not silently treat an admin as a guest.
     if (req.headers.authorization && !req.user) {
@@ -211,10 +221,18 @@ async function typingStatus(req, res, next) {
   } catch (e) { next(e); }
 }
 
+async function deleteTicketController(req, res, next) {
+  try {
+    await deleteTicket(req.params.id);
+    ok(res, { message: 'Ticket deleted' });
+  } catch (e) { next(e); }
+}
+
 module.exports = {
   getTickets, getOne, reply, setStatus, createTicket, getMyTickets, customerReply,
   getSupportSettings, updateSupportSettings,
   getDefaultMessages, addDefaultMessage, editDefaultMessage, removeDefaultMessage,
   getConversationHistory, getStaffUsers,
   markRead, setTyping, typingStatus,
+  deleteTicket: deleteTicketController,
 };

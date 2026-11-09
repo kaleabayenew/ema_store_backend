@@ -45,5 +45,6 @@ router.patch('/:id/status',             authenticate, ctrl.setStatus);
 router.post('/:id/read',                optionalAuth, ctrl.markRead);
 router.post('/:id/typing',              optionalAuth, ctrl.setTyping);
 router.get('/:id/typing',               ctrl.typingStatus);
+router.delete('/:id',                   authenticate, ctrl.deleteTicket);
 
 module.exports = router;
