@@ -1047,14 +1047,6 @@ app.use(cors({
   preflightContinue: false,
 }));
 
-// Explicit OPTIONS handler for all routes
-app.options('*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-guest-id, X-Device-Id');
-  res.status(204).send();
-});
-
 app.use(express.json());
 
 // ── Static files (uploads) ───────────────────────────────────────────────────────
