@@ -1,4 +1,4 @@
-﻿const { AppError } = require('../errors/app_error');
+const { AppError } = require('../errors/app_error');
 
 const isProduction = process.env.NODE_ENV === 'production';
 const isPgError = (code) => typeof code === 'string' && /^[0-9][0-9A-Z]{4}$/.test(code);
@@ -48,6 +48,12 @@ const errorHandler = (err, req, res, _next) => {
   }
   if (err.name === 'TokenExpiredError') {
     return fail(res, 401, 'TOKEN_EXPIRED', 'Session expired. Please sign in again.', req);
+  }
+
+  // CORS rejection from the cors middleware — an expected denial, not a
+  // server fault. Return 403 quietly so logs stay clean.
+  if (err.message === 'Origin not allowed' || err.message === 'Not allowed by CORS') {
+    return fail(res, 403, 'ORIGIN_NOT_ALLOWED', 'Origin not allowed.', req);
   }
 
   // Unknown / programmer error — never leak internals in production
