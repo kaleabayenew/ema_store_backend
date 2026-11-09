@@ -94,9 +94,35 @@ async function deleteFromStorage(key) {
   }
 }
 
+/**
+ * Save a chat image by key and return a fresh presigned URL
+ * @param {Buffer} buffer - Image buffer
+ * @param {string} messageId - Message ID for the key
+ * @param {string} contentType - MIME type (e.g., 'image/jpeg')
+ * @returns {Promise<string>} Fresh presigned URL
+ */
+async function saveChatImage(buffer, messageId, contentType) {
+  const key = `chat-images/${messageId}`;
+  await uploadToStorage(buffer, key, contentType);
+  return getPresignedUrl(key, 3600); // 1 hour fresh link
+}
+
+/**
+ * Generate a fresh presigned URL for a chat image
+ * @param {string} messageId - Message ID
+ * @param {number} expiresIn - URL expiration in seconds (default: 3600)
+ * @returns {Promise<string>} Fresh presigned URL
+ */
+async function getChatImageUrl(messageId, expiresIn = 3600) {
+  const key = `chat-images/${messageId}`;
+  return getPresignedUrl(key, expiresIn);
+}
+
 module.exports = {
   uploadToStorage,
   getPresignedUrl,
   deleteFromStorage,
+  saveChatImage,
+  getChatImageUrl,
   BUCKET_NAME,
 };
