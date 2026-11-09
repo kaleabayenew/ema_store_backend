@@ -1,4 +1,4 @@
-﻿const {
+const {
   listTickets,
   getTicket,
   addReply,
@@ -19,6 +19,22 @@
 } = require('./support.service');
 const { ok } = require('../../core/utils/response');
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Staff = any logged-in user whose role is not CUSTOMER / PARTNER. */
+function isStaffUser(user) {
+  if (!user) return false;
+  const role = String(user.role || '').toUpperCase();
+  return role !== '' && role !== 'CUSTOMER' && role !== 'PARTNER';
+}
+
+/** Stable guest identity sent by the app (device id). Body, query or header. */
+function getGuestId(req) {
+  const raw = req.body?.guestId || req.query?.guestId || req.headers['x-guest-id'] || req.headers['x-device-id'];
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  return id ? id.slice(0, 128) : null;
+}
+
 // ── Tickets ───────────────────────────────────────────────────────────────────
 
 async function getTickets(req, res, next) {
@@ -38,9 +54,21 @@ async function getOne(req, res, next) {
 
 async function reply(req, res, next) {
   try {
-    const { body } = req.body;
+    const body = req.body?.body;
     if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
-    const msg = await addReply(req.params.id, { senderId: req.user?.id, body: body.trim(), isStaff: true });
+
+    const staff = isStaffUser(req.user);
+    const guestId = staff ? null : getGuestId(req);
+    if (!staff && !req.user?.id && !guestId) {
+      return res.status(400).json({ success: false, message: 'guestId is required for guest replies' });
+    }
+
+    const msg = await addReply(req.params.id, {
+      senderId: req.user?.id || null,
+      guestId,
+      body: body.trim(),
+      isStaff: staff,           // decided by the server from the login, never by the client
+    });
     ok(res, { message: msg });
   } catch (e) { next(e); }
 }
@@ -54,9 +82,13 @@ async function setStatus(req, res, next) {
 
 async function createTicket(req, res, next) {
   try {
-    const { subject, message, priority = 'MEDIUM', guestId } = req.body;
+    const { subject, message, priority = 'MEDIUM' } = req.body;
+    const guestId = getGuestId(req);
     if (!subject?.trim() || !message?.trim()) {
       return res.status(400).json({ success: false, message: 'Subject and message are required' });
+    }
+    if (!req.user?.id && !guestId) {
+      return res.status(400).json({ success: false, message: 'guestId is required for guest tickets' });
     }
     const ticket = await createTicketService({
       userId: req.user?.id || null,
@@ -71,19 +103,13 @@ async function createTicket(req, res, next) {
 
 async function getMyTickets(req, res, next) {
   try {
-    const tickets = await getCustomerTickets(req.user.id);
+    const tickets = await getCustomerTickets(req.user?.id || null, getGuestId(req));
     ok(res, { tickets });
   } catch (e) { next(e); }
 }
 
-async function customerReply(req, res, next) {
-  try {
-    const { body, guestId } = req.body;
-    if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
-    const msg = await addReply(req.params.id, { senderId: req.user?.id || null, guestId: guestId || null, body: body.trim(), isStaff: false });
-    ok(res, { message: msg });
-  } catch (e) { next(e); }
-}
+// Kept for backwards compatibility - reply() now handles customers and staff.
+const customerReply = reply;
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -157,17 +183,15 @@ async function getStaffUsers(req, res, next) {
 
 async function markRead(req, res, next) {
   try {
-    // Admin (staff) marks customer messages as read by default
-    const byStaff = req.body?.byStaff ?? true;
-    await markMessagesRead(req.params.id, { byStaff });
+    // Staff reading -> marks customer messages read. Customer/guest reading -> marks staff messages read.
+    await markMessagesRead(req.params.id, { byStaff: isStaffUser(req.user) });
     ok(res, { message: 'Marked as read' });
   } catch (e) { next(e); }
 }
 
 async function setTyping(req, res, next) {
   try {
-    const isStaff = req.body?.isStaff ?? true;
-    await recordTyping(req.params.id, { userId: req.user?.id, isStaff });
+    await recordTyping(req.params.id, { userId: req.user?.id || null, isStaff: isStaffUser(req.user) });
     ok(res, { message: 'Typing recorded' });
   } catch (e) { next(e); }
 }
