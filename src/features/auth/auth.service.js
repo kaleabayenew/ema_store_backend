@@ -1,8 +1,13 @@
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { pool } = require('../../core/config/database');
-const { signToken } = require('../../core/utils/jwt');
+const { otpHmacSecret } = require('../../core/config');
 const { AppError } = require('../../core/errors/app_error');
 const { sendOtp: sendTelegramBotOtp } = require('../../core/services/telegram-bot.service');
+const { issueTokens, revokeAllForUser } = require('./token.service');
+const { logAuthEvent } = require('./audit.service');
+
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -20,19 +25,98 @@ function normalizePhone(phone) {
   return `+251${digits}`;
 }
 
-/** Generate a random 6-digit OTP string */
-const generateOtp = () =>
-  String(Math.floor(100_000 + Math.random() * 900_000));
+/** Cryptographically secure 6-digit OTP */
+const generateOtp = () => String(crypto.randomInt(100_000, 1_000_000));
 
 /** OTP validity window in minutes */
 const OTP_TTL_MINUTES = 15;
+/** Minimum seconds between two OTPs for the same phone + type */
+const OTP_RESEND_COOLDOWN_SECONDS = 60;
+/** Default max wrong attempts if the column is empty */
+const DEFAULT_MAX_ATTEMPTS = 5;
+/** bcrypt cost factor — DUMMY_HASH must match real hashes */
+const BCRYPT_COST = 12;
+
+/** OTP codes are stored as HMAC-SHA256(phone|type|code) — never plaintext. */
+const otpHash = (phone, type, code) =>
+  crypto
+    .createHmac('sha256', otpHmacSecret)
+    .update(`${phone}|${type}|${code}`)
+    .digest('hex');
+
+/** Constant-time string comparison */
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// ── Password policy ──────────────────────────────────────────────────────────
+const MIN_PASSWORD_BYTES = 8;
+const MAX_PASSWORD_BYTES = 72; // bcrypt limit
+
+const COMMON_PASSWORDS = new Set([
+  '123456', 'password', '12345678', 'qwerty', '123456789', '12345',
+  '1234', '111111', '1234567', '123123', 'abc123', '123321', 'password1',
+  'iloveyou', '1q2w3e4r', '000000', 'qwerty123', 'zaq12wsx', 'dragon',
+  'sunshine', 'princess', 'letmein', '654321', 'monkey', '27653',
+  '1qaz2wsx', '123qwe', 'qazwsx', 'trustno1', 'starwars', 'football',
+  'baseball', 'welcome', 'admin', 'master', 'hello123', 'freedom',
+  'whatever', 'qazwsxedc', 'password123', 'passw0rd', 'p@ssw0rd',
+  '123654', '159753', '987654321', '112233', '121212', '696969',
+]);
+
+function assertValidPassword(password, phone) {
+  const weak = () =>
+    new AppError('Password is too weak.', 400, 'WEAK_PASSWORD');
+
+  if (typeof password !== 'string' || !password) throw weak();
+
+  const bytes = Buffer.byteLength(password, 'utf8');
+  if (bytes < MIN_PASSWORD_BYTES || bytes > MAX_PASSWORD_BYTES) throw weak();
+
+  if (COMMON_PASSWORDS.has(password.toLowerCase())) throw weak();
+
+  if (phone) {
+    const digits = String(phone).replace(/\D/g, '');
+    if (password === digits || password === String(phone)) throw weak();
+  }
+}
+
+// A real bcrypt hash used to keep login timing the same when the user does not exist
+const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', BCRYPT_COST);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Send OTP  (persists to DB and sends via Telegram Bot)
+//  Send OTP  (persists HMAC hash to DB and sends via Telegram Bot)
+//  Returns { delivered } — the code itself is NEVER returned to the caller.
 // ─────────────────────────────────────────────────────────────────────────────
-async function sendOtp(phone, type = 'REGISTRATION') {
+async function sendOtp(phone, type = 'REGISTRATION', { pendingPasswordHash = null, req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
+
+  // Cooldown: stop OTP spamming
+  const { rows: lastRows } = await pool.query(
+    `SELECT created_at FROM otp_codes
+     WHERE phone = $1 AND type = $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [canonicalPhone, type],
+  );
+  if (lastRows.length > 0) {
+    const ageSeconds = (Date.now() - new Date(lastRows[0].created_at).getTime()) / 1000;
+    if (ageSeconds < OTP_RESEND_COOLDOWN_SECONDS) {
+      const wait = Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - ageSeconds);
+      throw new AppError(
+        `Please wait ${wait} seconds before requesting a new code.`,
+        429,
+        'OTP_COOLDOWN',
+      );
+    }
+  }
+
   const code = generateOtp();
+  const codeHash = otpHash(canonicalPhone, type, code);
   const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1_000);
 
   // Invalidate old codes of the same type for this phone
@@ -43,95 +127,152 @@ async function sendOtp(phone, type = 'REGISTRATION') {
   );
 
   await pool.query(
-    `INSERT INTO otp_codes (phone, code, type, expires_at)
-     VALUES ($1, $2, $3, $4)`,
-    [canonicalPhone, code, type, expiresAt],
+    `INSERT INTO otp_codes (phone, code_hash, type, expires_at, pending_password_hash)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [canonicalPhone, codeHash, type, expiresAt, pendingPasswordHash],
   );
 
-  // Try to send via Telegram Bot (if user has linked their account)
+  // Deliver via Telegram Bot (only if the user has linked their account)
+  let delivered = false;
   const { rows: chatRows } = await pool.query(
     'SELECT chat_id FROM telegram_chat_ids WHERE phone = $1',
     [canonicalPhone],
   );
 
   if (chatRows.length > 0) {
-    // Send via Telegram Bot (free)
-    const chatId = chatRows[0].chat_id;
-    const result = await sendTelegramBotOtp(chatId, code, type);
-    console.log(`[Telegram Bot] Sent to chat ${chatId}: ${code} - Success: ${result.success}`);
-  } else {
-    // Log OTP to console if user hasn't linked their Telegram account
-    console.log(`[OTP FALLBACK] ${canonicalPhone} → ${code} (${type}, expires ${expiresAt.toISOString()})`);
-    console.log(`[INFO] User has not linked Telegram account. OTP logged to console.`);
+    try {
+      const result = await sendTelegramBotOtp(chatRows[0].chat_id, code, type);
+      delivered = !!(result && result.success);
+    } catch (err) {
+      console.error('[OTP] Telegram delivery failed:', err.code || err.message);
+    }
   }
 
-  console.log(`[OTP] ${canonicalPhone} → ${code} (${type}, expires ${expiresAt.toISOString()})`);
+  logAuthEvent({
+    event: delivered ? 'OTP_SENT' : 'OTP_FAILED',
+    phone: canonicalPhone,
+    req,
+    meta: { type },
+  });
 
-  return code;
+  // Development only: print the code so you can test without Telegram.
+  // Requires OTP_DEV_LOG=true explicitly; never in production.
+  if (!IS_PROD && !delivered && process.env.OTP_DEV_LOG === 'true') {
+    console.log(`[OTP DEV] ${canonicalPhone} → ${code} (${type})`);
+  }
+
+  return { delivered };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Verify OTP
+//  - looks up the latest unused code for this phone/type
+//  - wrong code  → attempts + 1 (code is burned after max attempts)
+//  - right code  → marked used atomically (cannot be used twice)
+//  - pass a transaction client as `db` to keep the consume inside it
 // ─────────────────────────────────────────────────────────────────────────────
-async function verifyOtp(phone, code, type = 'REGISTRATION') {
+async function verifyOtp(phone, code, type = 'REGISTRATION', db = pool) {
   const canonicalPhone = normalizePhone(phone);
+  const submitted = String(code || '').trim();
 
-  const { rows } = await pool.query(
-    `SELECT id, attempts, max_attempts, expires_at, is_used
+  const { rows } = await db.query(
+    `SELECT id, code_hash, attempts, max_attempts, expires_at
      FROM otp_codes
-     WHERE phone = $1 AND code = $2 AND type = $3
+     WHERE phone = $1 AND type = $2 AND is_used = false
      ORDER BY created_at DESC
      LIMIT 1`,
-    [canonicalPhone, code.trim(), type],
+    [canonicalPhone, type],
   );
 
   const otp = rows[0];
+  if (!otp || !otp.code_hash) {
+    throw new AppError('Invalid OTP code.', 400, 'OTP_INVALID');
+  }
 
-  if (!otp) throw new AppError('Invalid OTP code.', 400, 'OTP_INVALID');
-  if (otp.is_used) throw new AppError('OTP already used.', 400, 'OTP_USED');
   if (new Date() > new Date(otp.expires_at)) {
+    await db.query('UPDATE otp_codes SET is_used = true WHERE id = $1', [otp.id]);
     throw new AppError('OTP has expired. Request a new one.', 400, 'OTP_EXPIRED');
   }
-  if (otp.attempts >= otp.max_attempts) {
-    throw new AppError('Too many incorrect attempts.', 429, 'OTP_MAX_ATTEMPTS');
+
+  const maxAttempts = otp.max_attempts || DEFAULT_MAX_ATTEMPTS;
+  if (otp.attempts >= maxAttempts) {
+    await db.query('UPDATE otp_codes SET is_used = true WHERE id = $1', [otp.id]);
+    throw new AppError('Too many incorrect attempts. Request a new code.', 429, 'OTP_MAX_ATTEMPTS');
   }
 
-  // Increment attempts and mark used
-  await pool.query(
-    `UPDATE otp_codes SET attempts = attempts + 1, is_used = true WHERE id = $1`,
+  const expectedHash = otpHash(canonicalPhone, type, submitted);
+  if (!safeEqual(otp.code_hash, expectedHash)) {
+    const burn = otp.attempts + 1 >= maxAttempts;
+    await db.query(
+      `UPDATE otp_codes SET attempts = attempts + 1, is_used = $2 WHERE id = $1`,
+      [otp.id, burn],
+    );
+    throw new AppError('Invalid OTP code.', 400, 'OTP_INVALID');
+  }
+
+  // Correct code → consume it atomically
+  const { rows: used } = await db.query(
+    `UPDATE otp_codes SET attempts = attempts + 1, is_used = true
+     WHERE id = $1 AND is_used = false
+     RETURNING id`,
     [otp.id],
   );
+  if (used.length === 0) throw new AppError('OTP already used.', 400, 'OTP_USED');
+
+  return otp.id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Referral helper (read-only check, done BEFORE the OTP is consumed)
+// ─────────────────────────────────────────────────────────────────────────────
+async function findValidReferral(referralCode) {
+  const { rows } = await pool.query(
+    `SELECT r.*, ru.phone AS referrer_phone
+       FROM referral_codes r
+       JOIN users ru ON ru.id = r.user_id
+      WHERE r.code = $1 AND r.is_active = true
+        AND (r.expires_at IS NULL OR r.expires_at > NOW())
+        AND r.total_uses < r.max_uses`,
+    [referralCode],
+  );
+  if (rows.length === 0) {
+    throw new AppError(
+      'Invalid or expired referral code. Please check and try again.',
+      400,
+      'INVALID_REFERRAL_CODE',
+    );
+  }
+  return rows[0];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Register  — Step 1: persist user + profile, Step 2: confirm via OTP
 // ─────────────────────────────────────────────────────────────────────────────
-async function registerStep1({ phone, fullName, password, referralCode }) {
+async function registerStep1({ phone, fullName, password, referralCode }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
+  assertValidPassword(password, canonicalPhone);
 
-  // Check existing user
   const { rows } = await pool.query(
     `SELECT id, is_active FROM users WHERE phone = $1`,
     [canonicalPhone],
   );
 
-  const passwordHash = await bcrypt.hash(password, 12);
+  if (rows.length > 0 && rows[0].is_active) {
+    throw new AppError('Phone number already registered. Please sign in.', 409, 'PHONE_TAKEN');
+  }
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+  // Pending users get a random unusable hash — the real password is only
+  // applied in registerStep2 after the OTP is verified.
+  const unusableHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), BCRYPT_COST);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     if (rows.length > 0) {
+      // Pending activation — update name only, NEVER the password here.
       const existing = rows[0];
-      if (existing.is_active) {
-        throw new AppError('Phone number already registered. Please sign in.', 409, 'PHONE_TAKEN');
-      }
-
-      // Pending activation — update details
-      await client.query(
-        `UPDATE users SET password_hash = $1, password_plain = $2, updated_at = NOW() WHERE id = $3`,
-        [passwordHash, password, existing.id],
-      );
       await client.query(
         `UPDATE customer_user SET full_name = $1, updated_at = NOW() WHERE user_id = $2`,
         [fullName.trim(), existing.id],
@@ -139,17 +280,15 @@ async function registerStep1({ phone, fullName, password, referralCode }) {
     } else {
       // Create fresh user in pending state
       const { rows: userRows } = await client.query(
-        `INSERT INTO users (phone, password_hash, password_plain, role, is_active)
-         VALUES ($1, $2, $3, 'CUSTOMER', false)
+        `INSERT INTO users (phone, password_hash, role, is_active)
+         VALUES ($1, $2, 'CUSTOMER', false)
          RETURNING id`,
-        [canonicalPhone, passwordHash, password],
+        [canonicalPhone, unusableHash],
       );
-      const userId = userRows[0].id;
-
       await client.query(
         `INSERT INTO customer_user (user_id, full_name)
          VALUES ($1, $2)`,
-        [userId, fullName.trim()],
+        [userRows[0].id, fullName.trim()],
       );
     }
 
@@ -161,67 +300,76 @@ async function registerStep1({ phone, fullName, password, referralCode }) {
     client.release();
   }
 
-  return sendOtp(canonicalPhone, 'REGISTRATION');
+  logAuthEvent({
+    event: 'REGISTER_STARTED',
+    userId: rows[0] ? rows[0].id : null,
+    phone: canonicalPhone,
+    req,
+  });
+
+  // The bcrypt hash travels with the OTP row and is only copied to the user
+  // after the OTP verifies — an attacker cannot overwrite a pending account.
+  return sendOtp(canonicalPhone, 'REGISTRATION', {
+    pendingPasswordHash: passwordHash,
+    req,
+  });
 }
 
-async function registerStep2({ phone, code, referralCode }) {
+async function registerStep2({ phone, code, referralCode }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
-  await verifyOtp(canonicalPhone, code, 'REGISTRATION');
+
+  // Check the referral first, so a bad referral does not waste the user's OTP
+  const referral = referralCode ? await findValidReferral(referralCode) : null;
 
   const client = await pool.connect();
+  let userId = null;
   try {
     await client.query('BEGIN');
 
-    // Activate user in DB
-    await client.query(
-      `UPDATE users SET is_active = true, updated_at = NOW() WHERE phone = $1`,
+    // OTP verify + activation in ONE transaction: a failed activation does
+    // not burn the code.
+    await verifyOtp(canonicalPhone, code, 'REGISTRATION', client);
+
+    // The password hash stored with the OTP (set in step 1).
+    const { rows: otpRows } = await client.query(
+      `SELECT pending_password_hash FROM otp_codes
+       WHERE phone = $1 AND type = 'REGISTRATION'
+       ORDER BY created_at DESC LIMIT 1`,
       [canonicalPhone],
     );
+    const pendingPasswordHash = otpRows[0] ? otpRows[0].pending_password_hash : null;
 
-    // Apply referral code if provided
-    if (referralCode) {
-      const { rows: userRows } = await client.query(
-        'SELECT id FROM users WHERE phone = $1',
-        [canonicalPhone]
+    const { rows: userRows } = await client.query(
+      `UPDATE users
+          SET is_active = true, updated_at = NOW(),
+              password_hash = COALESCE($2, password_hash)
+        WHERE phone = $1
+        RETURNING id`,
+      [canonicalPhone, pendingPasswordHash],
+    );
+    if (userRows.length === 0) {
+      throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
+    }
+    userId = userRows[0].id;
+
+    // Self-referral is blocked by user id AND by phone.
+    const isSelfReferral =
+      referral &&
+      (referral.user_id === userId || referral.referrer_phone === canonicalPhone);
+
+    if (referral && !isSelfReferral) {
+      await client.query(
+        'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
+        [referral.user_id, referral.reward_coins, userId],
       );
-
-      if (userRows.length > 0) {
-        const userId = userRows[0].id;
-
-        // Validate referral code
-        const { rows: referralRows } = await client.query(
-          `SELECT * FROM referral_codes 
-           WHERE code = $1 AND is_active = true 
-           AND (expires_at IS NULL OR expires_at > NOW())
-           AND total_uses < max_uses`,
-          [referralCode]
-        );
-
-        if (referralRows.length === 0) {
-          await client.query('ROLLBACK');
-          throw new AppError('Invalid or expired referral code. Please check and try again.', 400, 'INVALID_REFERRAL_CODE');
-        }
-
-        const referral = referralRows[0];
-
-        // Update user with referral
-        await client.query(
-          'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
-          [referral.user_id, referral.reward_coins, userId]
-        );
-
-        // Increment referral usage
-        await client.query(
-          'UPDATE referral_codes SET total_uses = total_uses + 1 WHERE id = $1',
-          [referral.id]
-        );
-
-        // Give coins to referrer
-        await client.query(
-          'UPDATE users SET coins = coins + $2 WHERE id = $1',
-          [referral.user_id, referral.reward_coins]
-        );
-      }
+      await client.query(
+        'UPDATE referral_codes SET total_uses = total_uses + 1 WHERE id = $1',
+        [referral.id],
+      );
+      await client.query(
+        'UPDATE users SET coins = coins + $2 WHERE id = $1',
+        [referral.user_id, referral.reward_coins],
+      );
     }
 
     await client.query('COMMIT');
@@ -232,76 +380,113 @@ async function registerStep2({ phone, code, referralCode }) {
     client.release();
   }
 
-  return _buildAuthResponse(canonicalPhone);
+  logAuthEvent({
+    event: 'REGISTER_COMPLETED',
+    userId,
+    phone: canonicalPhone,
+    req,
+  });
+
+  return _buildAuthResponse(canonicalPhone, { req });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Login (supports both phone login for customers and email login for admins)
+//  Login (phone for customers, email for admins)
 // ─────────────────────────────────────────────────────────────────────────────
-async function login({ phone, email, password }) {
+const LOGIN_SELECT = `
+  SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.is_verified,
+         u.is_blocked, u.block_reason, u.balance, u.coins, u.profile_image,
+         u.failed_login_count, u.locked_until,
+         cp.full_name, au.admin_role, au.allowed_pages
+  FROM users u
+  LEFT JOIN customer_user cp ON cp.user_id = u.id
+  LEFT JOIN admin_user au ON au.user_id = u.id`;
+
+/** 5th failure locks for 5 min; each extra failure doubles it, capped at 60 min. */
+async function recordFailedLogin(user) {
+  const newCount = (user.failed_login_count || 0) + 1;
+  let lockedUntil = null;
+  if (newCount >= 5) {
+    const minutes = Math.min(5 * Math.pow(2, newCount - 5), 60);
+    lockedUntil = new Date(Date.now() + minutes * 60 * 1000);
+  }
+  await pool.query(
+    `UPDATE users SET failed_login_count = $2, locked_until = $3, updated_at = NOW()
+     WHERE id = $1`,
+    [user.id, newCount, lockedUntil],
+  );
+  return lockedUntil;
+}
+
+async function login({ phone, email, password }, { req = null } = {}) {
   const canonicalPhone = phone ? normalizePhone(phone) : null;
   const normalizedEmail = email ? email.trim().toLowerCase() : null;
 
-  console.log('[Auth Service] Login attempt:', { canonicalPhone, normalizedEmail });
-
-  // Determine query based on whether phone or email is provided
-  let query, param;
+  let rows;
   if (canonicalPhone) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.is_verified, u.is_blocked, u.block_reason, u.balance, u.coins, u.profile_image,
-                    cp.full_name, au.admin_role
-             FROM users u
-             LEFT JOIN customer_user cp ON cp.user_id = u.id
-             LEFT JOIN admin_user au ON au.user_id = u.id
-             WHERE u.phone = $1`;
-    param = canonicalPhone;
+    ({ rows } = await pool.query(`${LOGIN_SELECT} WHERE u.phone = $1`, [canonicalPhone]));
   } else if (normalizedEmail) {
-    query = `SELECT u.id, u.phone, u.email, u.password_hash, u.role, u.is_active, u.is_verified, u.is_blocked, u.block_reason, u.balance, u.coins, u.profile_image,
-                    cp.full_name, au.admin_role
-             FROM users u
-             LEFT JOIN customer_user cp ON cp.user_id = u.id
-             LEFT JOIN admin_user au ON au.user_id = u.id
-             WHERE u.email = $1`;
-    param = normalizedEmail;
+    ({ rows } = await pool.query(`${LOGIN_SELECT} WHERE u.email = $1`, [normalizedEmail]));
   } else {
     throw new AppError('Phone or email is required.', 400, 'MISSING_CREDENTIALS');
   }
 
-  const { rows } = await pool.query(query, [param]);
   const user = rows[0];
 
-  console.log('[Auth Service] User found:', !!user, 'Active:', user?.is_active);
+  // Always run bcrypt, so response time does not reveal if the account exists
+  const match = await bcrypt.compare(String(password), user ? user.password_hash : DUMMY_HASH);
 
-  if (!user) {
-    throw new AppError('Account not found. Please check your credentials.', 401, 'USER_NOT_FOUND');
+  // One generic message for "no account" and "wrong password"
+  if (!user || !match) {
+    if (user) {
+      const lockedUntil = await recordFailedLogin(user);
+      logAuthEvent({
+        event: lockedUntil && lockedUntil > new Date() ? 'LOGIN_LOCKED' : 'LOGIN_FAILED',
+        userId: user.id,
+        phone: user.phone,
+        req,
+      });
+    }
+    throw new AppError('Invalid phone or password.', 401, 'INVALID_CREDENTIALS');
   }
+
+  // Lockout is checked AFTER the password compare so timing does not leak it.
+  if (user.locked_until && new Date(user.locked_until) > new Date()) {
+    logAuthEvent({ event: 'LOGIN_LOCKED', userId: user.id, phone: user.phone, req });
+    throw new AppError('Too many attempts. Try again later.', 429, 'ACCOUNT_TEMP_LOCKED');
+  }
+
+  // Account status is only revealed AFTER the password is correct
   if (user.is_blocked || (!user.is_active && user.is_verified)) {
     throw new AppError(
-      user.block_reason || 'Your account has been suspended by the administration. Please contact support.',
+      user.block_reason ||
+        'Your account has been suspended by the administration. Please contact support.',
       403,
-      'ACCOUNT_BLOCKED'
+      'ACCOUNT_BLOCKED',
     );
   }
   if (!user.is_active) {
     throw new AppError('Account not yet activated. Please verify your OTP.', 403, 'NOT_ACTIVATED');
   }
 
-  const match = await bcrypt.compare(password, user.password_hash);
-  console.log('[Auth Service] Password match:', match);
-  if (!match) {
-    throw new AppError('Incorrect password. Please try again.', 401, 'WRONG_PASSWORD');
-  }
+  // Successful login resets the failure counter.
+  await pool.query(
+    `UPDATE users SET failed_login_count = 0, locked_until = NULL, updated_at = NOW()
+     WHERE id = $1`,
+    [user.id],
+  );
 
   const effectiveRole = user.admin_role || user.role;
-  const token = signToken({
-    id: user.id,
-    phone: user.phone,
-    email: user.email,
-    role: effectiveRole,
-    adminRole: user.admin_role || effectiveRole,
-  });
-  console.log('[Auth Service] Token generated successfully');
+  const tokens = await issueTokens(
+    { id: user.id, role: effectiveRole, admin_role: user.admin_role },
+    req,
+  );
+
+  logAuthEvent({ event: 'LOGIN_SUCCESS', userId: user.id, phone: user.phone, req });
+
   return {
-    token,
+    ...tokens,
+    token: tokens.accessToken, // kept for old app versions
     user: {
       id: user.id,
       phone: user.phone,
@@ -311,6 +496,8 @@ async function login({ phone, email, password }) {
       adminRole: user.admin_role || effectiveRole,
       balance: parseFloat(user.balance) || 0,
       coins: user.coins || 0,
+      profileImage: user.profile_image || null,
+      allowedPages: user.admin_role ? user.allowed_pages || [] : [],
     },
   };
 }
@@ -318,37 +505,58 @@ async function login({ phone, email, password }) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Forgot password
 // ─────────────────────────────────────────────────────────────────────────────
-async function forgotPasswordStep1({ phone }) {
+async function forgotPasswordStep1({ phone }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
 
   const { rows } = await pool.query(
     `SELECT id FROM users WHERE phone = $1 AND is_active = true`,
     [canonicalPhone],
   );
+
+  // Do not reveal whether the number is registered — equalize the timing.
   if (rows.length === 0) {
-    throw new AppError('Phone number not found.', 404, 'USER_NOT_FOUND');
+    await sleep(250 + Math.floor(Math.random() * 150)); // 250–400 ms
+    return { delivered: false };
   }
 
-  return sendOtp(canonicalPhone, 'PASSWORD_RESET');
+  return sendOtp(canonicalPhone, 'PASSWORD_RESET', { req });
 }
 
-async function forgotPasswordStep2({ phone, code, newPassword }) {
+async function forgotPasswordStep2({ phone, code, newPassword }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
+  assertValidPassword(newPassword, canonicalPhone);
+
   await verifyOtp(canonicalPhone, code, 'PASSWORD_RESET');
 
-  const passwordHash = await bcrypt.hash(newPassword, 12);
-  await pool.query(
-    `UPDATE users SET password_hash = $1, password_plain = $2, updated_at = NOW() WHERE phone = $3`,
-    [passwordHash, newPassword, canonicalPhone],
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
+  const { rows } = await pool.query(
+    `UPDATE users
+        SET password_hash = $1, password_changed_at = NOW(),
+            failed_login_count = 0, locked_until = NULL, updated_at = NOW()
+      WHERE phone = $2
+      RETURNING id`,
+    [passwordHash, canonicalPhone],
   );
+
+  // Kill every existing session — old refresh tokens must not survive a reset.
+  if (rows[0]) {
+    await revokeAllForUser(rows[0].id);
+    logAuthEvent({
+      event: 'PASSWORD_RESET',
+      userId: rows[0].id,
+      phone: canonicalPhone,
+      req,
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Internal helper
 // ─────────────────────────────────────────────────────────────────────────────
-async function _buildAuthResponse(canonicalPhone) {
+async function _buildAuthResponse(canonicalPhone, { req = null } = {}) {
   const { rows } = await pool.query(
-    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, u.profile_image, cp.full_name, au.admin_role
+    `SELECT u.id, u.phone, u.email, u.role, u.balance, u.coins, u.profile_image,
+            cp.full_name, au.admin_role
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
      LEFT JOIN admin_user au ON au.user_id = u.id
@@ -358,19 +566,25 @@ async function _buildAuthResponse(canonicalPhone) {
   const user = rows[0];
   if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
 
-  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.adminRole || user.role, adminRole: user.admin_role });
+  const effectiveRole = user.admin_role || user.role;
+  const tokens = await issueTokens(
+    { id: user.id, role: effectiveRole, admin_role: user.admin_role },
+    req,
+  );
+
   return {
-    token,
+    ...tokens,
+    token: tokens.accessToken, // kept for old app versions
     user: {
       id: user.id,
       phone: user.phone,
       email: user.email,
       fullName: user.full_name || user.email || '',
-      role: user.role,
-      adminRole: user.adminRole,
+      role: effectiveRole,
+      adminRole: user.admin_role || effectiveRole,
       balance: parseFloat(user.balance) || 0,
       coins: user.coins || 0,
-      profileImage: user.profile_image,
+      profileImage: user.profile_image || null,
     },
   };
 }
@@ -381,7 +595,7 @@ async function _buildAuthResponse(canonicalPhone) {
 async function updateProfileImage(userId, profileImageUrl) {
   await pool.query(
     `UPDATE users SET profile_image = $1, updated_at = NOW() WHERE id = $2`,
-    [profileImageUrl, userId]
+    [profileImageUrl, userId],
   );
 }
 
@@ -396,7 +610,7 @@ async function getCurrentUser(userId) {
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
      WHERE u.id = $1`,
-    [userId]
+    [userId],
   );
   if (rows.length === 0) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -405,9 +619,10 @@ async function getCurrentUser(userId) {
 
   if (u.is_blocked || u.is_active === false) {
     throw new AppError(
-      u.block_reason || 'Your account has been suspended by the administration. Please contact support.',
+      u.block_reason ||
+        'Your account has been suspended by the administration. Please contact support.',
       403,
-      'ACCOUNT_BLOCKED'
+      'ACCOUNT_BLOCKED',
     );
   }
 
