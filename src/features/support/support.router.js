@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { authenticate } = require('../../core/middleware/auth');
+const { authenticate, requireStaff, requireSuperAdmin } = require('../../core/middleware/auth');
 const ctrl = require('./support.controller');
 
 const router = Router();
@@ -19,32 +19,35 @@ function optionalAuth(req, res, next) {
 
 // Settings
 router.get('/settings',                 ctrl.getSupportSettings);
-router.put('/admin/settings',           authenticate, ctrl.updateSupportSettings);
+router.put('/admin/settings',           requireStaff, ctrl.updateSupportSettings);
 
 // Default messages (canned responses)
-router.get('/default-messages',         authenticate, ctrl.getDefaultMessages);
-router.post('/default-messages',        authenticate, ctrl.addDefaultMessage);
-router.patch('/default-messages/:id',   authenticate, ctrl.editDefaultMessage);
-router.delete('/default-messages/:id',  authenticate, ctrl.removeDefaultMessage);
+router.get('/default-messages',         requireStaff, ctrl.getDefaultMessages);
+router.post('/default-messages',        requireStaff, ctrl.addDefaultMessage);
+router.patch('/default-messages/:id',   requireStaff, ctrl.editDefaultMessage);
+router.delete('/default-messages/:id',  requireStaff, ctrl.removeDefaultMessage);
 
 // My tickets (customer OR guest identified by guestId / x-device-id)
 router.get('/my-tickets',               optionalAuth, ctrl.getMyTickets);
 
 // Ticket list (admin) + create (customer or guest)
-router.get('/',                         authenticate, ctrl.getTickets);
+router.get('/',                         requireStaff, ctrl.getTickets);
 router.post('/',                        optionalAuth, ctrl.createTicket);
 
 // Conversation history + staff list (Super Admin only)
-router.get('/conversation-history',     authenticate, ctrl.getConversationHistory);
-router.get('/staff-users',              authenticate, ctrl.getStaffUsers);
+router.get('/conversation-history',     requireSuperAdmin, ctrl.getConversationHistory);
+router.get('/staff-users',              requireStaff, ctrl.getStaffUsers);
+
+// Image upload (guests can use this for chat images)
+router.post('/upload-image',            optionalAuth, ctrl.uploadChatImage);
 
 // ── Parameterised routes LAST ─────────────────────────────────────────────────
 router.get('/:id',                      optionalAuth, ctrl.getOne);
 router.post('/:id/reply',               optionalAuth, ctrl.reply);
-router.patch('/:id/status',             authenticate, ctrl.setStatus);
+router.patch('/:id/status',             requireStaff, ctrl.setStatus);
 router.post('/:id/read',                optionalAuth, ctrl.markRead);
 router.post('/:id/typing',              optionalAuth, ctrl.setTyping);
 router.get('/:id/typing',               ctrl.typingStatus);
-router.delete('/:id',                   authenticate, ctrl.deleteTicket);
+router.delete('/:id',                   requireStaff, ctrl.deleteTicket);
 
 module.exports = router;

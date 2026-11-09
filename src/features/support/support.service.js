@@ -1,5 +1,6 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
+const { getChatImageUrl } = require('../../core/config/storage');
 
 // ── Create ticket (customer) ───────────────────────────────────────────────────
 
@@ -172,7 +173,12 @@ async function listTickets({ status, search, page = 1, limit = 20 } = {}) {
        t.guest_id                      AS guest_id,
        COUNT(m.id)::int                AS message_count,
        -- unread for the admin = customer messages (is_staff = false) not yet read
-       COUNT(m.id) FILTER (WHERE m.is_staff = false AND m.read_at IS NULL)::int AS unread_count
+       COUNT(m.id) FILTER (WHERE m.is_staff = false AND m.read_at IS NULL)::int AS unread_count,
+       -- Sort by latest activity (latest message timestamp)
+       COALESCE(
+         (SELECT sent_at FROM support_messages WHERE ticket_id = t.id ORDER BY sent_at DESC LIMIT 1),
+         t.updated_at
+       ) AS latest_activity
      FROM support_tickets t
      LEFT JOIN users u              ON u.id = t.user_id
      LEFT JOIN customer_user cu     ON cu.user_id = t.user_id
@@ -181,7 +187,7 @@ async function listTickets({ status, search, page = 1, limit = 20 } = {}) {
      GROUP BY t.id, cu.full_name, u.phone
      ORDER BY
        CASE t.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
-       t.updated_at DESC
+       latest_activity DESC
      LIMIT $${idx} OFFSET $${idx + 1}`,
     [...params, limit, offset],
   );
@@ -228,7 +234,7 @@ async function getTicket(id) {
   if (rows.length === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
 
   const { rows: messages } = await pool.query(
-    `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at, m.guest_id,
+    `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at, m.guest_id, m.image_url,
             CASE
               WHEN m.is_staff = true THEN COALESCE(au.full_name, 'Support')
               ELSE COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(m.guest_id, 6), 'Customer')
@@ -243,6 +249,23 @@ async function getTicket(id) {
   );
 
   const t = rows[0];
+  
+  // Generate fresh presigned URLs for all images
+  const messagesWithFreshUrls = await Promise.all(
+    messages.map(async (m) => {
+      if (m.image_url) {
+        try {
+          const freshUrl = await getChatImageUrl(m.id, 3600); // 1 hour fresh link
+          return { ...m, imageUrl: freshUrl };
+        } catch (e) {
+          console.error('Failed to generate fresh image URL:', e);
+          return m;
+        }
+      }
+      return m;
+    })
+  );
+  
   return {
     id:            t.id,
     subject:       t.subject,
@@ -254,20 +277,21 @@ async function getTicket(id) {
     guestId:       t.guest_id ?? null,
     createdAt:     t.created_at,
     updatedAt:     t.updated_at,
-    messages: messages.map((m) => ({
+    messages: messagesWithFreshUrls.map((m) => ({
       id:         m.id,
       body:       m.body,
       isStaff:    m.is_staff === true,
       senderName: m.sender_name,
       sentAt:     m.sent_at,
       readAt:     m.read_at,
+      imageUrl:   m.image_url || null,
     })),
   };
 }
 
 // ── Add reply ─────────────────────────────────────────────────────────────────
 
-async function addReply(ticketId, { senderId, guestId, body, isStaff = false }) {
+async function addReply(ticketId, { senderId, guestId, body, imageUrl, isStaff = false }) {
   const { rows: tRows } = await pool.query(
     `SELECT id, status, user_id, guest_id FROM support_tickets WHERE id = $1`, [ticketId],
   );
@@ -284,15 +308,16 @@ async function addReply(ticketId, { senderId, guestId, body, isStaff = false }) 
   // Staff (admins, super admins, customer support) can reply to any ticket
 
   const { rows } = await pool.query(
-    `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [ticketId, senderId || null, isStaff ? null : (senderId ? null : guestId || null), body, isStaff],
+    `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, image_url, is_staff)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [ticketId, senderId || null, isStaff ? null : (senderId ? null : guestId || null), body, imageUrl, isStaff],
   );
 
   await pool.query(
     `UPDATE support_tickets
      SET updated_at = NOW(),
          status = CASE
+           WHEN $1::boolean = true  AND status = 'CLOSED' THEN 'OPEN'
            WHEN $1::boolean = true  AND status = 'OPEN'     THEN 'IN_PROGRESS'
            WHEN $1::boolean = false AND status = 'RESOLVED' THEN 'OPEN'
            ELSE status
@@ -308,6 +333,7 @@ async function addReply(ticketId, { senderId, guestId, body, isStaff = false }) 
     isStaff: m.is_staff === true,
     sentAt: m.sent_at,
     readAt: m.read_at,
+    imageUrl: m.image_url || null,
   };
 }
 
@@ -536,8 +562,22 @@ async function listStaffUsers() {
  * byStaff=true  → admin has read the customer's messages (is_staff=false)
  * byStaff=false → customer has read the staff's messages (is_staff=true)
  */
-async function markMessagesRead(ticketId, { byStaff = true } = {}) {
+async function markMessagesRead(ticketId, { byStaff = true, userId, guestId } = {}) {
   const targetIsStaff = !byStaff; // the messages being marked read
+  
+  // Ownership check for customers/guests
+  if (!byStaff) {
+    const { rows: tRows } = await pool.query(
+      `SELECT user_id, guest_id FROM support_tickets WHERE id = $1`,
+      [ticketId]
+    );
+    if (tRows.length === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
+    const ticket = tRows[0];
+    const owns = (userId && ticket.user_id === userId) ||
+                 (guestId && ticket.guest_id && ticket.guest_id === guestId);
+    if (!owns) throw new AppError('Not allowed to mark this ticket as read', 403, 'FORBIDDEN');
+  }
+  
   await pool.query(
     `UPDATE support_messages
      SET read_at = NOW()
@@ -547,8 +587,22 @@ async function markMessagesRead(ticketId, { byStaff = true } = {}) {
 }
 
 /** Record that someone is typing on a ticket (customers, guests and staff). */
-async function recordTyping(ticketId, { isStaff }) {
+async function recordTyping(ticketId, { isStaff, userId, guestId }) {
   try {
+    // Ownership check for customers/guests
+    if (!isStaff) {
+      const { rows: tRows } = await pool.query(
+        `SELECT user_id, guest_id FROM support_tickets WHERE id = $1`,
+        [ticketId]
+      );
+      if (tRows.length > 0) {
+        const ticket = tRows[0];
+        const owns = (userId && ticket.user_id === userId) ||
+                     (guestId && ticket.guest_id && ticket.guest_id === guestId);
+        if (!owns) return; // Silently ignore typing from non-owners
+      }
+    }
+    
     await pool.query(
       `INSERT INTO support_typing (ticket_id, is_staff, typed_at)
        VALUES ($1, $2, NOW())
@@ -600,6 +654,53 @@ async function deleteTicket(id) {
   }
 }
 
+// ── Get previous tickets for a customer ───────────────────────────────────────
+
+async function getPreviousTicketsForCustomer(userId, guestId, currentTicketId) {
+  const conds = [];
+  const params = [];
+  let idx = 1;
+  
+  if (userId) {
+    conds.push(`t.user_id = $${idx++}`);
+    params.push(userId);
+  }
+  if (guestId) {
+    conds.push(`t.guest_id = $${idx++}`);
+    params.push(guestId);
+  }
+  
+  if (currentTicketId) {
+    conds.push(`t.id != $${idx++}`);
+    params.push(currentTicketId);
+  }
+  
+  const { rows } = await pool.query(
+    `SELECT t.id, t.subject, t.status, t.created_at, t.updated_at,
+            COUNT(m.id)::int AS message_count
+     FROM support_tickets t
+     LEFT JOIN support_messages m ON m.ticket_id = t.id
+     WHERE ${conds.join(' AND ')}
+     GROUP BY t.id
+     ORDER BY t.updated_at DESC
+     LIMIT 5`,
+    params,
+  );
+  
+  return rows.map((r) => ({
+    id: r.id,
+    subject: r.subject,
+    status: r.status,
+    messageCount: r.message_count,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+// ── Upload chat image service ───────────────────────────────────────────────────
+
+// This is handled in the controller directly with saveChatImage from storage
+
 module.exports = {
   listTickets,
   getTicket,
@@ -620,4 +721,5 @@ module.exports = {
   recordTyping,
   getTypingStatus,
   deleteTicket,
+  getPreviousTicketsForCustomer,
 };

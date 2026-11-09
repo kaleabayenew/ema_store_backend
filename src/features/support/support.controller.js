@@ -18,8 +18,11 @@ const {
   recordTyping,
   getTypingStatus,
   deleteTicket,
+  getPreviousTicketsForCustomer,
 } = require('./support.service');
 const { ok } = require('../../core/utils/response');
+const { saveChatImage } = require('../../core/config/storage');
+const { uploadChatImage } = require('./support.upload');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -51,14 +54,23 @@ async function getTickets(req, res, next) {
 async function getOne(req, res, next) {
   try {
     const ticket = await getTicket(req.params.id);
-    ok(res, { ticket });
+    
+    // Get previous tickets for the same customer (for context)
+    const userId = req.user?.id || null;
+    const guestId = getGuestId(req);
+    const previousTickets = await getPreviousTicketsForCustomer(userId, guestId, ticket.id);
+    
+    ok(res, { ticket, previousTickets });
   } catch (e) { next(e); }
 }
 
 async function reply(req, res, next) {
   try {
     const body = req.body?.body;
-    if (!body?.trim()) return res.status(400).json({ success: false, message: 'Reply body is required' });
+    const imageUrl = req.body?.imageUrl;
+    if (!body?.trim() && !imageUrl) {
+      return res.status(400).json({ success: false, message: 'Reply body or image is required' });
+    }
 
     // Debug logging
     console.log('📝 Reply attempt:', {
@@ -82,7 +94,8 @@ async function reply(req, res, next) {
     const msg = await addReply(req.params.id, {
       senderId: req.user?.id || null,
       guestId,
-      body: body.trim(),
+      body: body?.trim() || null,
+      imageUrl: imageUrl || null,
       isStaff: staff,           // decided by the server from the login, never by the client
     });
     ok(res, { message: msg });
@@ -201,15 +214,24 @@ async function getStaffUsers(req, res, next) {
 
 async function markRead(req, res, next) {
   try {
+    // Ownership check: only ticket owner or staff can mark as read
+    const staff = isStaffUser(req.user);
+    if (!staff) {
+      // Customer/guest must own the ticket
+      const guestId = getGuestId(req);
+      // The service layer will handle ownership check
+    }
     // Staff reading -> marks customer messages read. Customer/guest reading -> marks staff messages read.
-    await markMessagesRead(req.params.id, { byStaff: isStaffUser(req.user) });
+    await markMessagesRead(req.params.id, { byStaff: staff, userId: req.user?.id, guestId: getGuestId() });
     ok(res, { message: 'Marked as read' });
   } catch (e) { next(e); }
 }
 
 async function setTyping(req, res, next) {
   try {
-    await recordTyping(req.params.id, { isStaff: isStaffUser(req.user) });
+    const staff = isStaffUser(req.user);
+    // Staff can type on any ticket, customers only on their own
+    await recordTyping(req.params.id, { isStaff: staff, userId: req.user?.id, guestId: getGuestId() });
     ok(res, { message: 'Typing recorded' });
   } catch (e) { next(e); }
 }
@@ -228,6 +250,22 @@ async function deleteTicketController(req, res, next) {
   } catch (e) { next(e); }
 }
 
+async function uploadChatImageController(req, res, next) {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    // Generate a temporary message ID for the image key
+    const tempMessageId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Upload to Neon Object Storage
+    const imageUrl = await saveChatImage(req.file.buffer, tempMessageId, req.file.mimetype);
+    
+    res.status(201).json({ success: true, imageUrl, tempMessageId });
+  } catch (e) { next(e); }
+}
+
 module.exports = {
   getTickets, getOne, reply, setStatus, createTicket, getMyTickets, customerReply,
   getSupportSettings, updateSupportSettings,
@@ -235,4 +273,5 @@ module.exports = {
   getConversationHistory, getStaffUsers,
   markRead, setTyping, typingStatus,
   deleteTicket: deleteTicketController,
+  uploadChatImage: uploadChatImageController,
 };
