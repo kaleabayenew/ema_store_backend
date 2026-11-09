@@ -573,6 +573,10 @@ async function autoMigrate() {
     try {
       await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS guest_id VARCHAR(100)`);
     } catch (e) { }
+    // Add image_url column for chat images
+    try {
+      await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS image_url TEXT`);
+    } catch (e) { }
     // Read receipts + typing indicator
     await pool.query(`ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`);
     try {
@@ -979,6 +983,14 @@ async function autoMigrate() {
 
 // Run auto-migration before starting the server
 autoMigrate();
+
+// Start the auto-close job for support tickets
+try {
+  const { startAutoCloseJob } = require('./features/support/support.autoclose');
+  startAutoCloseJob();
+} catch (e) {
+  console.warn('[App] Auto-close job skipped:', e.message);
+}
 
 // Initialise Firebase Admin SDK (gracefully skipped if key file is absent)
 try {
