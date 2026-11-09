@@ -182,7 +182,7 @@ async function getTicket(id) {
     messages: messages.map((m) => ({
       id:         m.id,
       body:       m.body,
-      isStaff:    m.is_staff,
+      isStaff:    m.is_staff === true,
       senderName: m.sender_name,
       sentAt:     m.sent_at,
       readAt:     m.read_at,
@@ -477,16 +477,22 @@ async function recordTyping(ticketId, { userId, isStaff }) {
 
 /** Who is currently typing on this ticket (within the last N seconds)? */
 async function getTypingStatus(ticketId, { windowSeconds = 5 } = {}) {
-  const { rows } = await pool.query(
-    `SELECT is_staff, MAX(typed_at) AS last_typed
-     FROM support_typing
-     WHERE ticket_id = $1 AND typed_at > NOW() - ($2 || ' seconds')::interval
-     GROUP BY is_staff`,
-    [ticketId, String(windowSeconds)],
-  );
-  const staffTyping = rows.some((r) => r.is_staff === true);
-  const customerTyping = rows.some((r) => r.is_staff === false);
-  return { staffTyping, customerTyping };
+  try {
+    const { rows } = await pool.query(
+      `SELECT is_staff, MAX(typed_at) AS last_typed
+       FROM support_typing
+       WHERE ticket_id = $1 AND typed_at > NOW() - ($2 || ' seconds')::interval
+       GROUP BY is_staff`,
+      [ticketId, String(windowSeconds)],
+    );
+    const staffTyping = rows.some((r) => r.is_staff === true);
+    const customerTyping = rows.some((r) => r.is_staff === false);
+    return { staffTyping, customerTyping };
+  } catch (e) {
+    // If table doesn't exist or other error, return not typing
+    console.error('getTypingStatus error:', e.message);
+    return { staffTyping: false, customerTyping: false };
+  }
 }
 
 module.exports = {
