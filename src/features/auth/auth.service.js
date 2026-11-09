@@ -1,7 +1,7 @@
-const bcrypt   = require('bcryptjs');
+const bcrypt = require('bcryptjs');
 const { pool } = require('../../core/config/database');
 const { signToken } = require('../../core/utils/jwt');
-const { AppError }  = require('../../core/errors/app_error');
+const { AppError } = require('../../core/errors/app_error');
 const { sendOtp: sendTelegramBotOtp } = require('../../core/services/telegram-bot.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,8 +32,8 @@ const OTP_TTL_MINUTES = 15;
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendOtp(phone, type = 'REGISTRATION') {
   const canonicalPhone = normalizePhone(phone);
-  const code           = generateOtp();
-  const expiresAt      = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1_000);
+  const code = generateOtp();
+  const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1_000);
 
   // Invalidate old codes of the same type for this phone
   await pool.query(
@@ -184,10 +184,10 @@ async function registerStep2({ phone, code, referralCode }) {
         'SELECT id FROM users WHERE phone = $1',
         [canonicalPhone]
       );
-      
+
       if (userRows.length > 0) {
         const userId = userRows[0].id;
-        
+
         // Validate referral code
         const { rows: referralRows } = await client.query(
           `SELECT * FROM referral_codes 
@@ -203,7 +203,7 @@ async function registerStep2({ phone, code, referralCode }) {
         }
 
         const referral = referralRows[0];
-        
+
         // Update user with referral
         await client.query(
           'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
@@ -291,7 +291,14 @@ async function login({ phone, email, password }) {
     throw new AppError('Incorrect password. Please try again.', 401, 'WRONG_PASSWORD');
   }
 
-  const token = signToken({ id: user.id, phone: user.phone, email: user.email, role: user.adminRole || user.role, adminRole: user.admin_role });
+  const effectiveRole = user.admin_role || user.role;
+  const token = signToken({
+    id: user.id,
+    phone: user.phone,
+    email: user.email,
+    role: effectiveRole,
+    adminRole: user.admin_role || effectiveRole,
+  });
   console.log('[Auth Service] Token generated successfully');
   return {
     token,
@@ -300,8 +307,8 @@ async function login({ phone, email, password }) {
       phone: user.phone,
       email: user.email,
       fullName: user.full_name || user.email || '',
-      role: user.role,
-      adminRole: user.adminRole,
+      role: effectiveRole,
+      adminRole: user.admin_role || effectiveRole,
       balance: parseFloat(user.balance) || 0,
       coins: user.coins || 0,
     },
