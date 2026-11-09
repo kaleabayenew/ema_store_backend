@@ -604,6 +604,26 @@ async function autoMigrate() {
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_user_id ON support_tickets (user_id)`);
       console.log('[Migration] ✓ Support typing table');
 
+      // Create reviews table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS reviews (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+          user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+          rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+          title VARCHAR(255) NOT NULL,
+          body TEXT NOT NULL,
+          helpful INTEGER DEFAULT 0,
+          seller_reply TEXT,
+          verified BOOLEAN DEFAULT false,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
+      console.log('[Migration] ✓ Reviews table');
+
       // ── One-time cleanup: merge duplicate open guest tickets into the newest one ──
       try {
         await pool.query(`
@@ -1050,8 +1070,6 @@ const corsOptions = {
   preflightContinue: false,
 };
 app.use(cors(corsOptions));
-// Explicitly respond to ALL OPTIONS preflight requests (belt-and-suspenders)
-app.options('*', cors(corsOptions));
 
 // ── Request logging ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -1103,7 +1121,7 @@ app.use('/api/v1/cart', cartRouter);
 app.use('/api/v1/orders', ordersRouter);
 app.use('/api/v1/wallet', walletRouter);
 app.use('/api/v1/payment-methods', paymentMethodsRouter);
-app.use('/api/v1/auctions', auctionsRouter);
+app.use('/api/v1/auctions', bidsRouter);
 app.use('/api/v1/wishlist', wishlistRouter);
 app.use('/api/v1/reviews', reviewsRouter);
 app.use('/api/v1/recently-viewed', recentlyViewedRouter);
@@ -1111,27 +1129,27 @@ app.use('/api/v1/marketing', marketingRouter);
 app.use('/api/v1/about', aboutRouter);
 
 // ── Partner routes ─────────────────────────────────────────────────────────────
-const partnerAuthRouter       = require('./features/partner/auth/auth.router');
-const partnerDashboardRouter  = require('./features/partner/dashboard/dashboard.router');
-const partnerProductsRouter   = require('./features/partner/products/products.router');
-const partnerOrdersRouter     = require('./features/partner/orders/orders.router');
-const partnerInventoryRouter  = require('./features/partner/inventory/inventory.router');
-const partnerEarningsRouter   = require('./features/partner/earnings/earnings.router');
-const partnerProfileRouter    = require('./features/partner/profile/profile.router');
-const partnerReviewsRouter    = require('./features/partner/reviews/reviews.router');
+const partnerAuthRouter = require('./features/partner/auth/auth.router');
+const partnerDashboardRouter = require('./features/partner/dashboard/dashboard.router');
+const partnerProductsRouter = require('./features/partner/products/products.router');
+const partnerOrdersRouter = require('./features/partner/orders/orders.router');
+const partnerInventoryRouter = require('./features/partner/inventory/inventory.router');
+const partnerEarningsRouter = require('./features/partner/earnings/earnings.router');
+const partnerProfileRouter = require('./features/partner/profile/profile.router');
+const partnerReviewsRouter = require('./features/partner/reviews/reviews.router');
 const partnerPromotionsRouter = require('./features/partner/promotions/promotions.router');
-const partnerSettingsRouter   = require('./features/partner/settings/settings.router');
+const partnerSettingsRouter = require('./features/partner/settings/settings.router');
 
-app.use('/api/v1/partner/auth',       partnerAuthRouter);
-app.use('/api/v1/partner/dashboard',  partnerDashboardRouter);
-app.use('/api/v1/partner/products',   partnerProductsRouter);
-app.use('/api/v1/partner/orders',     partnerOrdersRouter);
-app.use('/api/v1/partner/inventory',  partnerInventoryRouter);
-app.use('/api/v1/partner/earnings',   partnerEarningsRouter);
-app.use('/api/v1/partner/profile',    partnerProfileRouter);
-app.use('/api/v1/partner/reviews',    partnerReviewsRouter);
+app.use('/api/v1/partner/auth', partnerAuthRouter);
+app.use('/api/v1/partner/dashboard', partnerDashboardRouter);
+app.use('/api/v1/partner/products', partnerProductsRouter);
+app.use('/api/v1/partner/orders', partnerOrdersRouter);
+app.use('/api/v1/partner/inventory', partnerInventoryRouter);
+app.use('/api/v1/partner/earnings', partnerEarningsRouter);
+app.use('/api/v1/partner/profile', partnerProfileRouter);
+app.use('/api/v1/partner/reviews', partnerReviewsRouter);
 app.use('/api/v1/partner/promotions', partnerPromotionsRouter);
-app.use('/api/v1/partner/settings',   partnerSettingsRouter);
+app.use('/api/v1/partner/settings', partnerSettingsRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {

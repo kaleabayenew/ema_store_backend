@@ -20,10 +20,15 @@ async function startServer() {
 	// Start Telegram Bot if token is configured
 	let bot = null;
 	const botToken = process.env.TELEGRAM_BOT_TOKEN;
+	const botKey = process.env.TELEGRAM_BOT_API_KEY;
 	if (botToken) {
+		if (!botKey || botKey.length < 32) {
+			// Fail closed: the backend rejects bot calls without a valid key.
+			console.error('🤖 Telegram Bot: NOT STARTED (TELEGRAM_BOT_API_KEY missing or too short)');
+		} else {
 		try {
 			// Use a unique session to avoid conflicts
-			bot = new TelegramBot(botToken, { 
+			bot = new TelegramBot(botToken, {
 				polling: true,
 				request: {
 					agentOptions: {
@@ -34,117 +39,65 @@ async function startServer() {
 			});
 			console.log('🤖 Telegram Bot: Starting...');
 
-			// Handle /start command
-			bot.onText(/\/start(?: (.+))?/, async (msg, match) => {
-				const chatId = msg.chat.id;
-				const username = msg.from.username;
-				const startParam = match[1]; // The phone number from deep link
+			const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
+			const botHeaders = {
+				'Content-Type': 'application/json',
+				'x-bot-key': botKey,
+			};
 
-				// If phone number is provided in start parameter, auto-link it
-				if (startParam && startParam.trim()) {
-					// Decode URL-encoded phone number (Telegram sends it encoded)
-					let phone = decodeURIComponent(startParam.trim());
-					
-					// Validate phone number format
-					if (!phone.match(/^\+\d{10,15}$/)) {
-						bot.sendMessage(chatId, `
-❌ *Invalid Phone Number Format*
+			// Mask a phone number for logs: +251912345678 → +251*****5678
+			const maskPhone = (phone) => {
+				const digits = String(phone || '').replace(/\D/g, '');
+				if (digits.length < 7) return '***';
+				return `+${digits.slice(0, 3)}*****${digits.slice(-4)}`;
+			};
 
-The phone number format is incorrect. Please try again.
-
-Expected format: +251912345678
-						`, { 
-							parse_mode: 'Markdown',
-							reply_markup: {
-								inline_keyboard: [
-									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
-								]
-							}
-						});
-						return;
-					}
-
-					try {
-						const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
-						const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
-							method: 'POST',
-							headers: {
-								'Content-Type': 'application/json',
-							},
-							body: JSON.stringify({
-								phone: phone,
-								chat_id: chatId,
-								username: username,
-							}),
-						});
-
-						const data = await response.json();
-
-						if (data.success) {
-							// Send a test OTP to verify the link works
-							const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
-							await bot.sendMessage(chatId, `
-✅ *Phone Number Linked Successfully!*
-
-Your phone number: ${phone}
-
-We'll send a test code to verify everything is working...
-							`, { parse_mode: 'Markdown' });
-
-							// Send test OTP after a short delay
-							setTimeout(async () => {
-								try {
-									await bot.sendMessage(chatId, `
-🔐 *Test Verification Code*
-
-Your test code is: *${testOtp}*
-
-This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
-									`, { parse_mode: 'Markdown' });
-								} catch (error) {
-									console.error('[Bot] Failed to send test OTP:', error);
-								}
-							}, 1000);
-						} else if (data.code === 'PHONE_ALREADY_LINKED') {
-							// Phone is already linked to a different Telegram account
-							bot.sendMessage(chatId, `
-⚠️ *Phone Already Linked*
-
-This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
-
-Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
-							`, { parse_mode: 'Markdown' });
-						} else {
-							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
-						}
-					} catch (error) {
-						console.error('[Bot] Link error:', error);
-						bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
-					}
-					return;
+			// Normalize a Telegram contact phone to +251XXXXXXXXX
+			const normalizePhone = (raw) => {
+				let digits = String(raw || '').replace(/\D/g, '');
+				if (digits.startsWith('251') && digits.length === 12) {
+					// already international
+				} else if (digits.startsWith('0') && digits.length === 10) {
+					digits = `251${digits.slice(1)}`;
+				} else if (!digits.startsWith('251')) {
+					digits = `251${digits}`;
 				}
+				return `+${digits}`;
+			};
 
-				// No phone number in start parameter - check if already linked
+			// Link the chat to a phone via the backend (bot-key authenticated)
+			const linkPhone = async (chatId, phone, username) => {
+				const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
+					method: 'POST',
+					headers: botHeaders,
+					body: JSON.stringify({
+						phone: phone,
+						chat_id: chatId,
+						username: username,
+					}),
+				});
+				return response.json();
+			};
+
+			// Handle /start command — the ONLY way to link is the contact button
+			bot.onText(/\/start/, async (msg) => {
+				const chatId = msg.chat.id;
+
+				// Already linked? Tell the user instead of showing the button.
 				try {
-					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
 					const response = await fetch(`${backendUrl}/api/v1/telegram/check/${chatId}`, {
 						method: 'GET',
-						headers: {
-							'Content-Type': 'application/json',
-						},
+						headers: botHeaders,
 					});
-
 					const data = await response.json();
-
 					if (data.success && data.phone) {
-						// Phone already linked
 						bot.sendMessage(chatId, `
 ✅ *Your phone is already linked!*
 
-Phone: ${data.phone}
+Phone: ${maskPhone(data.phone)}
 
 You will receive verification codes here when you register or reset your password in the Ema Store app.
-						`, { 
+						`, {
 							parse_mode: 'Markdown',
 							reply_markup: {
 								inline_keyboard: [
@@ -155,20 +108,16 @@ You will receive verification codes here when you register or reset your passwor
 						return;
 					}
 				} catch (error) {
-					console.error('[Bot] Check link error:', error);
+					console.error('[Bot] Check link error:', error.message);
 				}
 
-				// Phone not linked, ask user to share it
-				pendingPhoneRequests.set(chatId, Date.now());
+				// Not linked — ask for the contact via the share button.
 				bot.sendMessage(chatId, `
 👋 *Welcome to Ema Store Bot!*
 
-This bot will send you verification codes when you register or reset your password.
+This bot sends you verification codes when you register or reset your password.
 
-Please share your phone number to link it:
-
-📱 *Option 1:* Click the button below to share your phone number
-📱 *Option 2:* Type it manually: +251912345678
+Tap the button below to share your phone number and link your account:
 				`, {
 					parse_mode: 'Markdown',
 					reply_markup: {
@@ -181,69 +130,36 @@ Please share your phone number to link it:
 				});
 			});
 
-			// Handle contact sharing (when user clicks "Share my phone number")
+			// Handle contact sharing — the ONLY way a phone gets linked.
+			// The contact must belong to the sender, otherwise anyone could
+			// link a victim's number and steal their OTP codes.
 			bot.on('contact', async (msg) => {
 				const chatId = msg.chat.id;
 				const contact = msg.contact;
-				const username = msg.from.username;
 
 				if (!contact || !contact.phone_number) {
 					bot.sendMessage(chatId, '❌ Failed to get phone number. Please try again.');
 					return;
 				}
 
-				// Format phone number (add + if missing)
-				let phone = contact.phone_number;
-				if (!phone.startsWith('+')) {
-					phone = '+' + phone;
+				if (contact.user_id !== msg.from.id) {
+					bot.sendMessage(chatId, 'Please share your own number using the button.');
+					return;
 				}
 
-				try {
-					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
-					const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
-						method: 'POST',
-						headers: {
-							'Content-Type': 'application/json',
-						},
-						body: JSON.stringify({
-							phone: phone,
-							chat_id: chatId,
-							username: username,
-						}),
-					});
+				const phone = normalizePhone(contact.phone_number);
 
-					const data = await response.json();
+				try {
+					const data = await linkPhone(chatId, phone, msg.from.username);
 
 					if (data.success) {
-						pendingPhoneRequests.delete(chatId);
-						
-						// Generate referral code for the user
-						let referralCode = null;
-						try {
-							const referralResponse = await fetch(`${backendUrl}/api/v1/referral/generate`, {
-								method: 'POST',
-								headers: {
-									'Content-Type': 'application/json',
-									'Authorization': `Bearer ${data.token}`, // If needed
-								},
-							});
-							const referralData = await referralResponse.json();
-							if (referralData.success) {
-								referralCode = referralData.data.code;
-							}
-						} catch (e) {
-							console.log('[Telegram Bot] Failed to generate referral code:', e.message);
-						}
-						
-						// Send a test OTP to verify the link works
-						const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
-						await bot.sendMessage(chatId, `
+						bot.sendMessage(chatId, `
 ✅ *Phone Number Linked Successfully!*
 
-Your phone number: ${phone}
+Your phone number: ${maskPhone(phone)}
 
-We'll send a test code to verify everything is working...
-						`, { 
+You'll receive verification codes here when you register or reset your password.
+						`, {
 							parse_mode: 'Markdown',
 							reply_markup: {
 								remove_keyboard: true,
@@ -252,57 +168,15 @@ We'll send a test code to verify everything is working...
 								]
 							}
 						});
-
-						// Send test OTP after a short delay
-						setTimeout(async () => {
-							try {
-								await bot.sendMessage(chatId, `
-🔐 *Test Verification Code*
-
-Your test code is: *${testOtp}*
-
-This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
-								`, { 
-									parse_mode: 'Markdown',
-									reply_markup: {
-										inline_keyboard: [
-											[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
-										]
-									}
-								});
-								
-								// Send referral link if generated
-								if (referralCode) {
-									await bot.sendMessage(chatId, `
-🎁 *Your Referral Link*
-
-Share this link with friends and earn 50 coins for each signup!
-
-Your referral code: \`${referralCode}\`
-
-Referral link: https://t.me/ema_store_bot?start=${referralCode}
-									`, { 
-										parse_mode: 'Markdown',
-										reply_markup: {
-											inline_keyboard: [
-												[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
-											]
-										}
-									});
-								}
-							} catch (err) {
-								console.log('[Telegram Bot] Error sending test OTP:', err.message);
-							}
-						}, 1000);
 					} else if (data.code === 'PHONE_ALREADY_LINKED') {
-						// Phone is already linked to a different Telegram account
+						// Do NOT reveal the other account's username.
 						bot.sendMessage(chatId, `
 ⚠️ *Phone Already Linked*
 
-This phone number is already linked to a different Telegram account (${data.existing_username || 'unknown'}).
+This phone number is already linked to a different Telegram account.
 
 Please use the same Telegram account that you originally registered with, or contact support to unlink your phone number.
-						`, { 
+						`, {
 							parse_mode: 'Markdown',
 							reply_markup: {
 								remove_keyboard: true
@@ -318,233 +192,21 @@ Please use the same Telegram account that you originally registered with, or con
 						});
 					}
 				} catch (error) {
-					console.error('[Bot] Link error:', error);
+					console.error('[Bot] Link error:', error.message);
 					bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
 				}
 			});
 
-			// Handle phone number input (when user sends a number after /start)
-			bot.on('message', async (msg) => {
-				const chatId = msg.chat.id;
-				const text = msg.text;
+			// /link is kept for convenience, but it can no longer link a typed
+			// number — only the Share Contact button proves phone ownership.
+			bot.onText(/\/link/, async (msg) => {
+				bot.sendMessage(msg.chat.id, `
+🔗 *Linking is done securely now*
 
-				// Skip commands and contacts
-				if (text?.startsWith('/') || msg.contact) return;
+For your safety, phone numbers can only be linked by sharing your own contact.
 
-				// Check if this is a pending phone number request
-				if (pendingPhoneRequests.has(chatId)) {
-					const phone = text.trim();
-					const username = msg.from.username;
-
-					// Validate phone number format (basic check)
-					if (!phone.match(/^\+\d{10,15}$/)) {
-						bot.sendMessage(chatId, `
-❌ *Invalid Phone Number Format*
-
-Please use the format: +251912345678
-
-Include the country code (+251 for Ethiopia) and 9-12 digits.
-
-Or click the button below to share your phone number automatically.
-						`, { 
-							parse_mode: 'Markdown',
-							reply_markup: {
-								keyboard: [
-									[{ text: '📱 Share my phone number', request_contact: true }]
-								],
-								one_time_keyboard: true,
-								resize_keyboard: true
-							}
-						});
-						return;
-					}
-
-					try {
-						const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
-						const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
-							method: 'POST',
-							headers: {
-								'Content-Type': 'application/json',
-							},
-							body: JSON.stringify({
-								phone: phone,
-								chat_id: chatId,
-								username: username,
-							}),
-						});
-
-						const data = await response.json();
-
-						if (data.success) {
-							pendingPhoneRequests.delete(chatId);
-							
-							// Send a test OTP to verify the link works
-							const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
-							await bot.sendMessage(chatId, `
-✅ *Phone Number Linked Successfully!*
-
-Your phone number: ${phone}
-
-We'll send a test code to verify everything is working...
-							`, { 
-								parse_mode: 'Markdown',
-								reply_markup: {
-									remove_keyboard: true
-								}
-							});
-
-							// Send test OTP after a short delay
-							setTimeout(async () => {
-								try {
-									await bot.sendMessage(chatId, `
-🔐 *Test Verification Code*
-
-Your test code is: *${testOtp}*
-
-This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
-									`, { parse_mode: 'Markdown' });
-								} catch (error) {
-									console.error('[Bot] Failed to send test OTP:', error);
-								}
-							}, 1000);
-						} else if (data.code === 'PHONE_ALREADY_LINKED') {
-							// Phone is already linked to a different Telegram account
-							bot.sendMessage(chatId, `
-⚠️ *Wrong Telegram Account!*
-
-You're currently logged into a different Telegram account than the one used for this phone number.
-
-📱 **Your phone:** ${phone}
-👤 **Linked to account:** ${data.existing_username || 'a different Telegram account'}
-
-❌ *What to do:*
-1. Open Telegram
-2. Go to Settings → Switch Account
-3. Switch to the account: ${data.existing_username || 'your original account'}
-4. Open this bot again from that account
-
-Or contact support to unlink your phone number.
-							`, { 
-								parse_mode: 'Markdown',
-								reply_markup: {
-									remove_keyboard: true,
-									inline_keyboard: [
-										[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
-									]
-								}
-							});
-						} else {
-							bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`);
-						}
-					} catch (error) {
-						console.error('[Bot] Link error:', error);
-						bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
-					}
-				} else {
-					// If not pending, don't respond to random messages
-					// Only respond to commands
-					if (!text?.startsWith('/')) {
-						return;
-					}
-					
-					bot.sendMessage(chatId, `
-Please use the commands:
-- /start - Link your phone number
-- /link <phone> - Link your phone number directly
-					`);
-				}
-			});
-
-			// Handle /link command (direct link with phone number)
-			bot.onText(/\/link (.+)/, async (msg, match) => {
-				const chatId = msg.chat.id;
-				const phone = match[1].trim();
-				const username = msg.from.username;
-
-				// Validate phone number format
-				if (!phone.match(/^\+\d{10,15}$/)) {
-					bot.sendMessage(chatId, `
-❌ *Invalid Phone Number Format*
-
-Please use the format: +251912345678
-
-Include the country code (+251 for Ethiopia) and 9-12 digits.
-					`, { parse_mode: 'Markdown' });
-					return;
-				}
-
-				try {
-					const backendUrl = process.env.BACKEND_URL || `http://localhost:${port}`;
-					const response = await fetch(`${backendUrl}/api/v1/telegram/link`, {
-						method: 'POST',
-						headers: {
-							'Content-Type': 'application/json',
-						},
-						body: JSON.stringify({
-							phone: phone,
-							chat_id: chatId,
-							username: username,
-						}),
-					});
-
-					const data = await response.json();
-
-					if (data.success) {
-						// Send a test OTP to verify the link works
-						const testOtp = Math.floor(100000 + Math.random() * 900000).toString();
-						await bot.sendMessage(chatId, `
-✅ *Phone Number Linked Successfully!*
-
-Your phone number: ${phone}
-
-We'll send a test code to verify everything is working...
-						`, { parse_mode: 'Markdown' });
-
-						// Send test OTP after a short delay
-						setTimeout(async () => {
-							try {
-								await bot.sendMessage(chatId, `
-🔐 *Test Verification Code*
-
-Your test code is: *${testOtp}*
-
-This confirms your phone is linked correctly. You'll receive real codes when you register or reset your password.
-								`, { parse_mode: 'Markdown' });
-							} catch (error) {
-								console.error('[Bot] Failed to send test OTP:', error);
-							}
-						}, 1000);
-					} else if (data.code === 'PHONE_ALREADY_LINKED') {
-						// Phone is already linked to a different Telegram account
-						bot.sendMessage(chatId, `
-⚠️ *Wrong Telegram Account!*
-
-You're currently logged into a different Telegram account than the one used for this phone number.
-
-📱 **Your phone:** ${phone}
-👤 **Linked to account:** ${data.existing_username || 'a different Telegram account'}
-
-❌ *What to do:*
-1. Open Telegram
-2. Go to Settings → Switch Account
-3. Switch to the account: ${data.existing_username || 'your original account'}
-4. Open this bot again from that account
-
-Or contact support to unlink your phone number.
-						`, { parse_mode: 'Markdown' });
-					} else {
-						bot.sendMessage(chatId, `❌ Failed to link phone number: ${data.message}`, {
-							reply_markup: {
-								inline_keyboard: [
-									[{ text: '📱 Back to App', url: 'https://ema-store-backend.onrender.com' }]
-								]
-							}
-						});
-					}
-				} catch (error) {
-					console.error('[Bot] Link error:', error);
-					bot.sendMessage(chatId, '❌ Failed to link phone number. Please try again later.');
-				}
+Please go back and tap *Start* (@${process.env.TELEGRAM_BOT_USERNAME || 'your_bot'}) or send /start, then tap the *"Share my phone number"* button.
+				`, { parse_mode: 'Markdown' });
 			});
 
 			// Handle bot errors - suppress conflict errors
@@ -560,6 +222,7 @@ Or contact support to unlink your phone number.
 			console.log('🤖 Telegram Bot: Started successfully');
 		} catch (error) {
 			console.error('🤖 Telegram Bot: Failed to start', error.message);
+		}
 		}
 	} else {
 		console.log('🤖 Telegram Bot: Skipped (TELEGRAM_BOT_TOKEN not set)');
