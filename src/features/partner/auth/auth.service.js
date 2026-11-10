@@ -1,4 +1,4 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { signToken } = require('../../../core/utils/jwt');
 const { AppError } = require('../../../core/errors/app_error');
 const {
@@ -114,7 +114,11 @@ async function verifyLogin(phone, otp) {
     return { status: 'PENDING', message: 'Account pending approval.' };
   }
 
-  const token = signToken({ id: user.id, role: 'PARTNER', shopName: user.shop_name });
+  // Partner app has no refresh-token flow yet, so it keeps a longer-lived token.
+  const token = signToken(
+    { id: user.id, role: 'PARTNER', shopName: user.shop_name },
+    { expiresIn: '7d' },
+  );
 
   return {
     token,
