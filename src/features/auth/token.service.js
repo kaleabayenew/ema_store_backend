@@ -10,7 +10,7 @@ const { logAuthEvent } = require('./audit.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Refresh tokens — opaque random strings, stored ONLY as SHA-256 hashes.
-//  Rotation: every use revites the old token and issues a new one in the same
+//  Rotation: every use revokes the old token and issues a new one in the same
 //  family. Reuse of a rotated/revoked token revokes the WHOLE family.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -79,8 +79,6 @@ async function issueTokens(user, req) {
       ipOf(req),
     ],
   );
-
-  logAuthEvent({ event: 'TOKEN_REFRESH', userId: user.id, req });
 
   return {
     accessToken: signAccessToken(accessClaims(user)),
