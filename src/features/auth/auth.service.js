@@ -89,6 +89,28 @@ const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', BCRYPT_COST);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Ethiopian mobile numbers only: +2519XXXXXXXX or +2517XXXXXXXX. */
+const PHONE_RE = /^\+251[79]\d{8}$/;
+
+/** Same delay for "nothing happened" paths so timing does not reveal accounts. */
+const quietDelay = () => sleep(250 + Math.floor(Math.random() * 150));
+
+/**
+ * The bcrypt hash a pending registration chose, from the newest REGISTRATION
+ * code of the last 24 hours. Used so "resend code" keeps the password.
+ */
+async function latestPendingHash(canonicalPhone) {
+  const { rows } = await pool.query(
+    `SELECT pending_password_hash FROM otp_codes
+      WHERE phone = $1 AND type = 'REGISTRATION'
+        AND pending_password_hash IS NOT NULL
+        AND created_at > NOW() - INTERVAL '1 day'
+      ORDER BY created_at DESC LIMIT 1`,
+    [canonicalPhone],
+  );
+  return rows[0] ? rows[0].pending_password_hash : null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Send OTP  (persists HMAC hash to DB and sends via Telegram Bot)
 //  Returns { delivered } — the code itself is NEVER returned to the caller.
@@ -115,6 +137,13 @@ async function sendOtp(phone, type = 'REGISTRATION', { pendingPasswordHash = nul
     }
   }
 
+  // A resend must keep the password chosen at sign-up, otherwise the account
+  // would be activated with an unusable password.
+  let carriedHash = pendingPasswordHash;
+  if (!carriedHash && type === 'REGISTRATION') {
+    carriedHash = await latestPendingHash(canonicalPhone);
+  }
+
   const code = generateOtp();
   const codeHash = otpHash(canonicalPhone, type, code);
   const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1_000);
@@ -129,7 +158,7 @@ async function sendOtp(phone, type = 'REGISTRATION', { pendingPasswordHash = nul
   await pool.query(
     `INSERT INTO otp_codes (phone, code_hash, type, expires_at, pending_password_hash)
      VALUES ($1, $2, $3, $4, $5)`,
-    [canonicalPhone, codeHash, type, expiresAt, pendingPasswordHash],
+    [canonicalPhone, codeHash, type, expiresAt, carriedHash],
   );
 
   // Deliver via Telegram Bot (only if the user has linked their account)
@@ -167,16 +196,20 @@ async function sendOtp(phone, type = 'REGISTRATION', { pendingPasswordHash = nul
 // ─────────────────────────────────────────────────────────────────────────────
 //  Verify OTP
 //  - looks up the latest unused code for this phone/type
-//  - wrong code  → attempts + 1 (code is burned after max attempts)
-//  - right code  → marked used atomically (cannot be used twice)
-//  - pass a transaction client as `db` to keep the consume inside it
+//  - EVERY guess is counted first, atomically, on the pool (never inside a
+//    caller's transaction) so a rollback can never undo a failed attempt and
+//    parallel guesses cannot beat the limit
+//  - wrong code  → attempt stays counted (code burned after max attempts)
+//  - right code  → consumed atomically, unless { consume: false } is passed;
+//    then it returns { id, pendingPasswordHash } and the caller consumes it
+//    inside its own transaction
 // ─────────────────────────────────────────────────────────────────────────────
-async function verifyOtp(phone, code, type = 'REGISTRATION', db = pool) {
+async function verifyOtp(phone, code, type = 'REGISTRATION', { consume = true } = {}) {
   const canonicalPhone = normalizePhone(phone);
   const submitted = String(code || '').trim();
 
-  const { rows } = await db.query(
-    `SELECT id, code_hash, attempts, max_attempts, expires_at
+  const { rows } = await pool.query(
+    `SELECT id, expires_at, pending_password_hash
      FROM otp_codes
      WHERE phone = $1 AND type = $2 AND is_used = false
      ORDER BY created_at DESC
@@ -185,36 +218,45 @@ async function verifyOtp(phone, code, type = 'REGISTRATION', db = pool) {
   );
 
   const otp = rows[0];
-  if (!otp || !otp.code_hash) {
+  if (!otp) {
     throw new AppError('Invalid OTP code.', 400, 'OTP_INVALID');
   }
 
+  const burn = () =>
+    pool.query('UPDATE otp_codes SET is_used = true WHERE id = $1', [otp.id]);
+
   if (new Date() > new Date(otp.expires_at)) {
-    await db.query('UPDATE otp_codes SET is_used = true WHERE id = $1', [otp.id]);
+    await burn();
     throw new AppError('OTP has expired. Request a new one.', 400, 'OTP_EXPIRED');
   }
 
-  const maxAttempts = otp.max_attempts || DEFAULT_MAX_ATTEMPTS;
-  if (otp.attempts >= maxAttempts) {
-    await db.query('UPDATE otp_codes SET is_used = true WHERE id = $1', [otp.id]);
+  // Count this attempt BEFORE comparing. No row back = no attempts left.
+  const { rows: counted } = await pool.query(
+    `UPDATE otp_codes
+        SET attempts = attempts + 1
+      WHERE id = $1 AND is_used = false
+        AND attempts < COALESCE(max_attempts, $2::int)
+      RETURNING code_hash, attempts, COALESCE(max_attempts, $2::int) AS max_attempts`,
+    [otp.id, DEFAULT_MAX_ATTEMPTS],
+  );
+  if (counted.length === 0) {
+    await burn();
     throw new AppError('Too many incorrect attempts. Request a new code.', 429, 'OTP_MAX_ATTEMPTS');
   }
 
+  const row = counted[0];
   const expectedHash = otpHash(canonicalPhone, type, submitted);
-  if (!safeEqual(otp.code_hash, expectedHash)) {
-    const burn = otp.attempts + 1 >= maxAttempts;
-    await db.query(
-      `UPDATE otp_codes SET attempts = attempts + 1, is_used = $2 WHERE id = $1`,
-      [otp.id, burn],
-    );
+  if (!row.code_hash || !safeEqual(row.code_hash, expectedHash)) {
+    if (row.attempts >= row.max_attempts) await burn();
     throw new AppError('Invalid OTP code.', 400, 'OTP_INVALID');
   }
 
-  // Correct code → consume it atomically
-  const { rows: used } = await db.query(
-    `UPDATE otp_codes SET attempts = attempts + 1, is_used = true
-     WHERE id = $1 AND is_used = false
-     RETURNING id`,
+  if (!consume) {
+    return { id: otp.id, pendingPasswordHash: otp.pending_password_hash || null };
+  }
+
+  const { rows: used } = await pool.query(
+    `UPDATE otp_codes SET is_used = true WHERE id = $1 AND is_used = false RETURNING id`,
     [otp.id],
   );
   if (used.length === 0) throw new AppError('OTP already used.', 400, 'OTP_USED');
@@ -250,15 +292,24 @@ async function findValidReferral(referralCode) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function registerStep1({ phone, fullName, password, referralCode }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
+  if (!PHONE_RE.test(canonicalPhone)) {
+    throw new AppError('Invalid phone number.', 400, 'INVALID_PHONE');
+  }
   assertValidPassword(password, canonicalPhone);
 
   const { rows } = await pool.query(
-    `SELECT id, is_active FROM users WHERE phone = $1`,
+    `SELECT id, is_active, is_blocked, is_verified, role FROM users WHERE phone = $1`,
     [canonicalPhone],
   );
 
-  if (rows.length > 0 && rows[0].is_active) {
-    throw new AppError('Phone number already registered. Please sign in.', 409, 'PHONE_TAKEN');
+  // Only a genuinely pending CUSTOMER may restart sign-up. Active, blocked,
+  // suspended (verified but inactive) and non-customer accounts are refused —
+  // otherwise a blocked user could re-register and unblock themselves.
+  if (rows.length > 0) {
+    const u = rows[0];
+    if (u.is_active || u.is_blocked || u.is_verified || u.role !== 'CUSTOMER') {
+      throw new AppError('Phone number already registered. Please sign in.', 409, 'PHONE_TAKEN');
+    }
   }
 
   const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
@@ -321,31 +372,38 @@ async function registerStep2({ phone, code, referralCode }, { req = null } = {})
   // Check the referral first, so a bad referral does not waste the user's OTP
   const referral = referralCode ? await findValidReferral(referralCode) : null;
 
+  // Check the code OUTSIDE the transaction: a wrong guess must stay counted
+  // even though the transaction below is rolled back on failure.
+  const otp = await verifyOtp(canonicalPhone, code, 'REGISTRATION', { consume: false });
+
+  if (!otp.pendingPasswordHash) {
+    // e.g. the code was issued without a password (older than 24 h): never
+    // activate an account whose password nobody chose.
+    throw new AppError('Registration expired. Please sign up again.', 400, 'REGISTRATION_EXPIRED');
+  }
+
   const client = await pool.connect();
   let userId = null;
   try {
     await client.query('BEGIN');
 
-    // OTP verify + activation in ONE transaction: a failed activation does
-    // not burn the code.
-    await verifyOtp(canonicalPhone, code, 'REGISTRATION', client);
-
-    // The password hash stored with the OTP (set in step 1).
-    const { rows: otpRows } = await client.query(
-      `SELECT pending_password_hash FROM otp_codes
-       WHERE phone = $1 AND type = 'REGISTRATION'
-       ORDER BY created_at DESC LIMIT 1`,
-      [canonicalPhone],
+    // Consume the code and activate the user in ONE transaction: if the
+    // activation fails, the code is not burned.
+    const { rows: used } = await client.query(
+      `UPDATE otp_codes SET is_used = true WHERE id = $1 AND is_used = false RETURNING id`,
+      [otp.id],
     );
-    const pendingPasswordHash = otpRows[0] ? otpRows[0].pending_password_hash : null;
+    if (used.length === 0) throw new AppError('OTP already used.', 400, 'OTP_USED');
 
     const { rows: userRows } = await client.query(
       `UPDATE users
-          SET is_active = true, updated_at = NOW(),
-              password_hash = COALESCE($2, password_hash)
+          SET is_active = true, updated_at = NOW(), password_hash = $2
         WHERE phone = $1
+          AND is_active = false
+          AND COALESCE(is_blocked, false) = false
+          AND role = 'CUSTOMER'
         RETURNING id`,
-      [canonicalPhone, pendingPasswordHash],
+      [canonicalPhone, otp.pendingPasswordHash],
     );
     if (userRows.length === 0) {
       throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
@@ -436,6 +494,15 @@ async function login({ phone, email, password }, { req = null } = {}) {
   // Always run bcrypt, so response time does not reveal if the account exists
   const match = await bcrypt.compare(String(password), user ? user.password_hash : DUMMY_HASH);
 
+  // A locked account answers 429 for EVERY password, right or wrong. If only the
+  // right password got 429, the lock itself would tell an attacker which guess
+  // is correct. Attempts made while locked are not counted, so the lock cannot
+  // be stretched forever by someone hammering a victim's number.
+  if (user && user.locked_until && new Date(user.locked_until) > new Date()) {
+    logAuthEvent({ event: 'LOGIN_LOCKED', userId: user.id, phone: user.phone, req });
+    throw new AppError('Too many attempts. Try again later.', 429, 'ACCOUNT_TEMP_LOCKED');
+  }
+
   // One generic message for "no account" and "wrong password"
   if (!user || !match) {
     if (user) {
@@ -448,12 +515,6 @@ async function login({ phone, email, password }, { req = null } = {}) {
       });
     }
     throw new AppError('Invalid phone or password.', 401, 'INVALID_CREDENTIALS');
-  }
-
-  // Lockout is checked AFTER the password compare so timing does not leak it.
-  if (user.locked_until && new Date(user.locked_until) > new Date()) {
-    logAuthEvent({ event: 'LOGIN_LOCKED', userId: user.id, phone: user.phone, req });
-    throw new AppError('Too many attempts. Try again later.', 429, 'ACCOUNT_TEMP_LOCKED');
   }
 
   // Account status is only revealed AFTER the password is correct
@@ -508,18 +569,67 @@ async function login({ phone, email, password }, { req = null } = {}) {
 async function forgotPasswordStep1({ phone }, { req = null } = {}) {
   const canonicalPhone = normalizePhone(phone);
 
-  const { rows } = await pool.query(
-    `SELECT id FROM users WHERE phone = $1 AND is_active = true`,
-    [canonicalPhone],
-  );
+  let rows = [];
+  if (PHONE_RE.test(canonicalPhone)) {
+    ({ rows } = await pool.query(
+      `SELECT id FROM users
+        WHERE phone = $1 AND is_active = true AND COALESCE(is_blocked, false) = false`,
+      [canonicalPhone],
+    ));
+  }
 
   // Do not reveal whether the number is registered — equalize the timing.
   if (rows.length === 0) {
-    await sleep(250 + Math.floor(Math.random() * 150)); // 250–400 ms
+    await quietDelay(); // 250–400 ms
     return { delivered: false };
   }
 
-  return sendOtp(canonicalPhone, 'PASSWORD_RESET', { req });
+  try {
+    return await sendOtp(canonicalPhone, 'PASSWORD_RESET', { req });
+  } catch (err) {
+    // A cooldown error would only ever appear for registered numbers, which
+    // lets anyone list them. Answer exactly like the "not registered" case.
+    if (err && err.code === 'OTP_COOLDOWN') return { delivered: false };
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Resend OTP (customer flows). Same generic outcome for every number.
+// ─────────────────────────────────────────────────────────────────────────────
+async function resendOtp(phone, type, { req = null } = {}) {
+  if (type === 'PASSWORD_RESET') {
+    return forgotPasswordStep1({ phone }, { req });
+  }
+
+  const canonicalPhone = normalizePhone(phone);
+
+  // Only a genuinely pending CUSTOMER sign-up with a saved password can get a
+  // new registration code; everything else behaves like "nothing to resend".
+  let pending = false;
+  if (PHONE_RE.test(canonicalPhone)) {
+    const { rows } = await pool.query(
+      `SELECT id FROM users
+        WHERE phone = $1 AND is_active = false
+          AND COALESCE(is_blocked, false) = false
+          AND COALESCE(is_verified, false) = false
+          AND role = 'CUSTOMER'`,
+      [canonicalPhone],
+    );
+    pending = rows.length > 0 && !!(await latestPendingHash(canonicalPhone));
+  }
+
+  if (!pending) {
+    await quietDelay();
+    return { delivered: false };
+  }
+
+  try {
+    return await sendOtp(canonicalPhone, 'REGISTRATION', { req });
+  } catch (err) {
+    if (err && err.code === 'OTP_COOLDOWN') return { delivered: false };
+    throw err;
+  }
 }
 
 async function forgotPasswordStep2({ phone, code, newPassword }, { req = null } = {}) {
@@ -533,21 +643,23 @@ async function forgotPasswordStep2({ phone, code, newPassword }, { req = null } 
     `UPDATE users
         SET password_hash = $1, password_changed_at = NOW(),
             failed_login_count = 0, locked_until = NULL, updated_at = NOW()
-      WHERE phone = $2
+      WHERE phone = $2 AND is_active = true
       RETURNING id`,
     [passwordHash, canonicalPhone],
   );
 
-  // Kill every existing session — old refresh tokens must not survive a reset.
-  if (rows[0]) {
-    await revokeAllForUser(rows[0].id);
-    logAuthEvent({
-      event: 'PASSWORD_RESET',
-      userId: rows[0].id,
-      phone: canonicalPhone,
-      req,
-    });
+  if (!rows[0]) {
+    throw new AppError('Could not reset the password.', 400, 'RESET_FAILED');
   }
+
+  // Kill every existing session — old refresh tokens must not survive a reset.
+  await revokeAllForUser(rows[0].id);
+  logAuthEvent({
+    event: 'PASSWORD_RESET',
+    userId: rows[0].id,
+    phone: canonicalPhone,
+    req,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +763,7 @@ module.exports = {
   login,
   forgotPasswordStep1,
   forgotPasswordStep2,
+  resendOtp,
   updateProfileImage,
   getCurrentUser,
 };
