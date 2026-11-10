@@ -233,4 +233,98 @@ async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
   };
 }
 
-module.exports = { getTransactions, getUsers, getSummary };
+/**
+ * Admin deposit/withdraw: adjust a user's real balance and record the
+ * movement in wallet_transactions so it shows up in history.
+ *
+ * direction: 'deposit' credits the balance, 'withdraw' debits it.
+ * Withdrawals are rejected when they would make the balance negative.
+ */
+async function adjustBalance({ userId, direction, amount, note, adminId }) {
+  const value = parseFloat(amount);
+  if (!userId || !direction || !Number.isFinite(value) || value <= 0) {
+    const { AppError } = require('../../core/errors/app_error');
+    throw new AppError('A user, direction and a positive amount are required.', 400, 'INVALID_ADJUSTMENT');
+  }
+  if (direction !== 'deposit' && direction !== 'withdraw') {
+    const { AppError } = require('../../core/errors/app_error');
+    throw new AppError('Direction must be deposit or withdraw.', 400, 'INVALID_DIRECTION');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: userRows } = await client.query(
+      `SELECT id, role, balance FROM users
+        WHERE id = $1 AND role IN ('CUSTOMER', 'PARTNER', 'RIDE')
+        FOR UPDATE`,
+      [userId],
+    );
+    if (userRows.length === 0) {
+      const { AppError } = require('../../core/errors/app_error');
+      throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
+    }
+
+    const current = parseFloat(userRows[0].balance) || 0;
+    const delta = direction === 'deposit' ? value : -value;
+
+    if (direction === 'withdraw' && current < value) {
+      const { AppError } = require('../../core/errors/app_error');
+      throw new AppError(
+        `Insufficient balance. Available: ETB ${current.toFixed(2)}.`,
+        400,
+        'INSUFFICIENT_BALANCE',
+      );
+    }
+
+    const { rows: updated } = await client.query(
+      `UPDATE users SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING balance`,
+      [delta, userId],
+    );
+
+    const type = direction === 'deposit' ? 'ADMIN_DEPOSIT' : 'ADMIN_WITHDRAW';
+    const title = direction === 'deposit' ? 'Admin deposit' : 'Admin withdrawal';
+    const description = note && note.trim() ? note.trim() : null;
+
+    const { rows: txn } = await client.query(
+      `INSERT INTO wallet_transactions
+         (user_id, title, description, amount, type, status, metadata)
+       VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6)
+       RETURNING id, amount, type, status, created_at`,
+      [
+        userId,
+        title,
+        description,
+        delta,
+        type,
+        JSON.stringify({ adminId: adminId || null, note: description }),
+      ],
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      userId,
+      direction,
+      amount: value,
+      newBalance: parseFloat(updated[0].balance) || 0,
+      transaction: {
+        id: txn[0].id,
+        amount: parseFloat(txn[0].amount),
+        type: txn[0].type,
+        status: txn[0].status,
+        createdAt: txn[0].created_at,
+      },
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { getTransactions, getUsers, getSummary, adjustBalance };
