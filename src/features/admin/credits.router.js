@@ -10,6 +10,7 @@ const router = Router();
 router.use(requireStaff);
 
 router.get('/credits/transactions', ctrl.listTransactions);
+router.get('/credits/users', ctrl.listUsers);
 router.get('/credits/summary', ctrl.summary);
 
 module.exports = router;
