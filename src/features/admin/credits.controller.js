@@ -5,9 +5,10 @@ const { ok } = require('../../core/utils/response');
 
 async function listTransactions(req, res, next) {
   try {
-    const { q, role, direction, currency, status, page, limit } = req.query;
+    const { q, userId, role, direction, currency, status, page, limit } = req.query;
     const data = await svc.getTransactions({
       q,
+      userId,
       role,
       direction,
       currency,
@@ -15,6 +16,16 @@ async function listTransactions(req, res, next) {
       page,
       limit,
     });
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function listUsers(req, res, next) {
+  try {
+    const { q, role, page, limit } = req.query;
+    const data = await svc.getUsers({ q, role, page, limit });
     ok(res, data);
   } catch (err) {
     next(err);
@@ -30,4 +41,4 @@ async function summary(req, res, next) {
   }
 }
 
-module.exports = { listTransactions, summary };
+module.exports = { listTransactions, listUsers, summary };
