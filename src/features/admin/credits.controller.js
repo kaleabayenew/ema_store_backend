@@ -32,6 +32,22 @@ async function listUsers(req, res, next) {
   }
 }
 
+async function adjust(req, res, next) {
+  try {
+    const { userId, direction, amount, note } = req.body || {};
+    const data = await svc.adjustBalance({
+      userId,
+      direction,
+      amount,
+      note,
+      adminId: req.user?.id ?? null,
+    });
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function summary(req, res, next) {
   try {
     const data = await svc.getSummary();
@@ -41,4 +57,4 @@ async function summary(req, res, next) {
   }
 }
 
-module.exports = { listTransactions, listUsers, summary };
+module.exports = { listTransactions, listUsers, adjust, summary };
