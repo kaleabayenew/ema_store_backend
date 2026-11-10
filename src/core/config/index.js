@@ -1,4 +1,4 @@
-﻿require('dotenv').config({ quiet: true });
+require('dotenv').config({ quiet: true });
 
 const nodeEnv = process.env.NODE_ENV || 'development';
 const isProduction = nodeEnv === 'production';
@@ -105,6 +105,7 @@ const fromEnvList = (process.env.ALLOWED_ORIGINS || '')
   .filter(Boolean);
 
 const productionOrigins = [
+  'https://ema-store-web.onrender.com',
   process.env.CUSTOMER_APP_URL,
   process.env.CUSTOMER_APP_URL_ANDROID,
   process.env.CUSTOMER_APP_URL_IOS,
