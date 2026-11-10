@@ -209,12 +209,9 @@ const resendOtp = async (req, res, next) => {
     if (!OTP_TYPES.includes(type))
       return error(res, 'type must be REGISTRATION or PASSWORD_RESET.', 400, 'INVALID_TYPE');
 
-    if (type === 'PASSWORD_RESET') {
-      // Goes through the same check as forgot-password (active accounts only)
-      await service.forgotPasswordStep1({ phone }, { req });
-    } else {
-      await service.sendOtp(phone, type, { req });
-    }
+    // One service call for both types: it only sends to real pending / active
+    // accounts and answers the same way for every other number.
+    await service.resendOtp(phone, type, { req });
 
     ok(res, { message: 'If the number is valid, a new code has been sent.' });
   } catch (err) {
