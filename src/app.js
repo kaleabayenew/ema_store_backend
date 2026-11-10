@@ -1084,7 +1084,7 @@ const corsOptions = {
     'Content-Type', 'Authorization', 'X-Requested-With',
     'x-guest-id', 'X-Guest-Id', 'x-device-id', 'X-Device-Id',
   ],
-  exposedHeaders: ['X-Total-Count'],
+  exposedHeaders: ['X-Total-Count', 'Retry-After'],
   credentials: false,
   optionsSuccessStatus: 204,
   preflightContinue: false,
