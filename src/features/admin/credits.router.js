@@ -11,6 +11,7 @@ router.use(requireStaff);
 
 router.get('/credits/transactions', ctrl.listTransactions);
 router.get('/credits/users', ctrl.listUsers);
+router.post('/credits/adjust', ctrl.adjust);
 router.get('/credits/summary', ctrl.summary);
 
 module.exports = router;
