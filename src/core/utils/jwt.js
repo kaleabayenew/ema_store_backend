@@ -1,4 +1,4 @@
-﻿const crypto = require('crypto');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { jwtSecret, accessTokenExpiresIn } = require('../config');
 
@@ -26,7 +26,7 @@ function ttlToSeconds(ttl) {
 const ACCESS_TOKEN_TTL_SECONDS = ttlToSeconds(ACCESS_TOKEN_TTL);
 
 /** Only these claims may appear in a token — everything else is dropped. */
-const ALLOWED_CLAIMS = ['id', 'role', 'adminRole', 'phone', 'email'];
+const ALLOWED_CLAIMS = ['id', 'role', 'adminRole', 'phone', 'email', 'shopName'];
 
 function pickClaims(payload = {}) {
   const claims = {};
@@ -39,14 +39,17 @@ function pickClaims(payload = {}) {
 /**
  * Sign an access token for a user.
  * @param {{ id: string, phone?: string, email?: string, role: string, adminRole?: string }} payload
+ * @param {{ expiresIn?: string }} [options] lifetime override. Customers use the
+ *   default (15 min + refresh token). The partner app has no refresh flow yet,
+ *   so it passes a longer lifetime explicitly.
  * @returns {string} signed JWT
  */
-const signAccessToken = (payload) =>
+const signAccessToken = (payload, { expiresIn } = {}) =>
   jwt.sign(pickClaims(payload), jwtSecret, {
     algorithm: ALGORITHM,
     issuer: ISSUER,
     audience: AUDIENCE,
-    expiresIn: ACCESS_TOKEN_TTL,
+    expiresIn: expiresIn || ACCESS_TOKEN_TTL,
     jwtid: crypto.randomUUID(),
   });
 
