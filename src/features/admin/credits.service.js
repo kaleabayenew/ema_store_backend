@@ -17,6 +17,7 @@ const PAGE_LIMIT_MAX = 100;
  */
 async function getTransactions({
   q,
+  userId,
   role,
   direction = 'all',
   currency = 'all',
@@ -38,6 +39,10 @@ async function getTransactions({
       OR u.phone ILIKE ${like} OR u.full_name ILIKE ${like} OR u.email ILIKE ${like}
       OR cu.full_name ILIKE ${like} OR pp.business_name ILIKE ${like} OR pp.owner_name ILIKE ${like}
     )`);
+  }
+
+  if (userId) {
+    where.push(`wt.user_id = ${push(userId)}`);
   }
 
   if (role && role !== 'ALL') {
@@ -153,4 +158,79 @@ async function getSummary() {
   return { totalBalance, totalCoins, byRole };
 }
 
-module.exports = { getTransactions, getSummary };
+/**
+ * List all wallet users (customers, partners, riders) with their balances,
+ * coins and transaction stats — powers the admin Credits "All users" table.
+ */
+async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
+  const where = [`u.role IN ('CUSTOMER', 'PARTNER', 'RIDE')`];
+  const params = [];
+  const push = (value) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  if (q && q.trim()) {
+    const like = push(`%${q.trim()}%`);
+    where.push(`(
+      u.phone ILIKE ${like} OR u.email ILIKE ${like} OR u.full_name ILIKE ${like}
+      OR cu.full_name ILIKE ${like} OR pp.business_name ILIKE ${like} OR pp.owner_name ILIKE ${like}
+    )`);
+  }
+
+  if (role && role !== 'ALL') {
+    where.push(`u.role = ${push(role)}`);
+  }
+
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const safeLimit = Math.min(PAGE_LIMIT_MAX, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (safePage - 1) * safeLimit;
+
+  const from = `
+    FROM users u
+    LEFT JOIN customer_user cu ON cu.user_id = u.id
+    LEFT JOIN partner_profile pp ON pp.user_id = u.id
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS tx_count, MAX(wt.created_at) AS last_at
+      FROM wallet_transactions wt WHERE wt.user_id = u.id
+    ) tx ON true
+    ${whereSql}
+  `;
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(
+      `SELECT
+         u.id, u.role, u.phone, u.email, u.balance, u.coins, u.created_at,
+         COALESCE(cu.full_name, pp.business_name, pp.owner_name, u.full_name, u.phone) AS display_name,
+         COALESCE(tx.tx_count, 0) AS tx_count,
+         tx.last_at
+       ${from}
+       ORDER BY u.created_at DESC
+       LIMIT ${push(safeLimit)} OFFSET ${push(offset)}`,
+      params,
+    ),
+    pool.query(`SELECT COUNT(*)::int AS total ${from}`, params.slice(0, params.length - 2)),
+  ]);
+
+  return {
+    users: rowsRes.rows.map((r) => ({
+      id: r.id,
+      role: r.role,
+      phone: r.phone,
+      email: r.email,
+      name: r.display_name || 'Unknown',
+      balance: parseFloat(r.balance) || 0,
+      coins: r.coins || 0,
+      transactionCount: r.tx_count || 0,
+      lastActivityAt: r.last_at,
+      createdAt: r.created_at,
+    })),
+    total: countRes.rows[0]?.total || 0,
+    page: safePage,
+    limit: safeLimit,
+  };
+}
+
+module.exports = { getTransactions, getUsers, getSummary };
