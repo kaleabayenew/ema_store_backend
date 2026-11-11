@@ -358,13 +358,17 @@ async function adjustBalance({ userId, direction, amount, note, adminId }) {
 async function getCoinRate() {
   try {
     const { rows } = await pool.query(
-      `SELECT coins_per_unit, updated_at FROM coin_settings WHERE id = 'default'`,
+      `SELECT coins_per_unit, conversion_enabled, updated_at
+         FROM coin_settings WHERE id = 'default'`,
     );
-    const rate = parseFloat(rows[0]?.coins_per_unit) || 100;
-    return { coinsPerUnit: rate, updatedAt: rows[0]?.updated_at ?? null };
+    return {
+      coinsPerUnit: parseFloat(rows[0]?.coins_per_unit) || 100,
+      conversionEnabled: rows[0]?.conversion_enabled !== false,
+      updatedAt: rows[0]?.updated_at ?? null,
+    };
   } catch {
     // Table may not exist yet on an older deployment — fall back to default.
-    return { coinsPerUnit: 100, updatedAt: null };
+    return { coinsPerUnit: 100, conversionEnabled: true, updatedAt: null };
   }
 }
 
@@ -385,4 +389,29 @@ async function setCoinRate(coinsPerUnit) {
   return { coinsPerUnit: parseFloat(rows[0].coins_per_unit), updatedAt: rows[0].updated_at };
 }
 
-module.exports = { getTransactions, getUsers, getSummary, adjustBalance, getCoinRate, setCoinRate };
+async function updateCoinSettings({ coinsPerUnit, conversionEnabled } = {}) {
+  const rate = coinsPerUnit !== undefined ? parseFloat(coinsPerUnit) : null;
+  if (rate !== null && (!Number.isFinite(rate) || rate <= 0)) {
+    const err = new Error('coinsPerUnit must be a positive number');
+    err.status = 400;
+    throw err;
+  }
+  const enabled = conversionEnabled !== undefined ? !!conversionEnabled : null;
+  const { rows } = await pool.query(
+    `INSERT INTO coin_settings (id, coins_per_unit, conversion_enabled, updated_at)
+     VALUES ('default', COALESCE($1, 100), COALESCE($2, true), NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       coins_per_unit = COALESCE($1, coin_settings.coins_per_unit),
+       conversion_enabled = COALESCE($2, coin_settings.conversion_enabled),
+       updated_at = NOW()
+     RETURNING coins_per_unit, conversion_enabled, updated_at`,
+    [rate, enabled],
+  );
+  return {
+    coinsPerUnit: parseFloat(rows[0].coins_per_unit),
+    conversionEnabled: rows[0].conversion_enabled !== false,
+    updatedAt: rows[0].updated_at,
+  };
+}
+
+module.exports = { getTransactions, getUsers, getSummary, adjustBalance, getCoinRate, setCoinRate, updateCoinSettings };
