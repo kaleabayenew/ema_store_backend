@@ -180,10 +180,15 @@ async function convertCoinsToBalance(userId, coins) {
     }
 
     // Conversion rate from coin_settings (default: 100 coins = 1 Birr)
-    const { rows: rateRows } = await client.query(
-      `SELECT coins_per_unit FROM coin_settings WHERE id = 'default'`
-    );
-    const coinsPerUnit = parseFloat(rateRows[0]?.coins_per_unit) || 100;
+    let coinsPerUnit = 100;
+    try {
+      const { rows: rateRows } = await client.query(
+        `SELECT coins_per_unit FROM coin_settings WHERE id = 'default'`
+      );
+      coinsPerUnit = parseFloat(rateRows[0]?.coins_per_unit) || 100;
+    } catch {
+      // coin_settings may not exist on older deployments — keep default.
+    }
     const balanceToAdd = coins / coinsPerUnit;
 
     // Update user's balance and coins
