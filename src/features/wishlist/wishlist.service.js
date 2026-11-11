@@ -2,9 +2,22 @@
 
 const { pool } = require('../../core/config/database');
 
+// wishlist.created_at may be missing on older schemas (failed migration).
+// Ensure it once per process so wishlist queries never 500.
+let _wishlistEnsured = null;
+function ensureWishlistColumns() {
+  if (!_wishlistEnsured) {
+    _wishlistEnsured = pool
+      .query(`ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
+      .catch(() => {});
+  }
+  return _wishlistEnsured;
+}
+
 class WishlistService {
   // Get user's wishlist
   async getUserWishlist(userId) {
+    await ensureWishlistColumns();
     const query = `
       SELECT
         w.product_id,
