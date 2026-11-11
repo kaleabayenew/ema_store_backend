@@ -941,6 +941,10 @@ async function autoMigrate() {
         VALUES ('default', 100)
         ON CONFLICT (id) DO NOTHING
       `);
+      await pool.query(`
+        ALTER TABLE coin_settings
+        ADD COLUMN IF NOT EXISTS conversion_enabled BOOLEAN NOT NULL DEFAULT true
+      `);
       console.log('[Migration] ✓ Coin settings table');
     } catch (e) {
       console.log('[Migration] ⚠ Coin settings table:', e.message);
