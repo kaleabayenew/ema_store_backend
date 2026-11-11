@@ -115,3 +115,18 @@ exports.getBalanceHistory = async (req, res) => {
     });
   }
 };
+
+// Get public coin configuration (rate, toggles) for the customer app
+exports.getCoinConfig = async (req, res) => {
+  try {
+    const { getCoinSettings } = require('../admin/credits.service');
+    const settings = await getCoinSettings();
+    res.json({ success: true, ...settings });
+  } catch (error) {
+    console.error('Error fetching coin config:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch coin config'
+    });
+  }
+};

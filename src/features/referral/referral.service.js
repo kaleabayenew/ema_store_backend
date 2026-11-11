@@ -1,5 +1,6 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
+const { getCoinSettings } = require('../admin/credits.service');
 
 // ── Generate referral code for user ─────────────────────────────────────────
 
@@ -38,12 +39,16 @@ async function generateReferralCode(userId) {
       throw new AppError('Failed to generate unique referral code', 500, 'CODE_GENERATION_FAILED');
     }
 
+    // Reward amount comes from the admin coin settings (invite gift).
+    const settings = await getCoinSettings();
+    const rewardCoins = settings.inviteGiftEnabled ? settings.inviteGiftCoins : 0;
+
     // Insert referral code
     const { rows } = await client.query(
       `INSERT INTO referral_codes (user_id, code, reward_coins, max_uses, expires_at)
-       VALUES ($1, $2, 50, 100, NOW() + INTERVAL '1 year')
+       VALUES ($1, $2, $3, 100, NOW() + INTERVAL '1 year')
        RETURNING *`,
-      [userId, code]
+      [userId, code, rewardCoins]
     );
 
     // Update user's referral_code column
@@ -105,10 +110,18 @@ async function applyReferralCode(userId, referralCode) {
       throw new AppError('User already used a referral code', 400, 'ALREADY_REFERRED');
     }
 
+    // Invite gift on/off + amount from admin coin settings.
+    const settings = await getCoinSettings();
+    if (!settings.inviteGiftEnabled) {
+      await client.query('ROLLBACK');
+      throw new AppError('Invite rewards are currently disabled', 403, 'INVITE_GIFT_DISABLED');
+    }
+    const rewardCoins = settings.inviteGiftCoins;
+
     // Update user with referral
     await client.query(
       'UPDATE users SET referred_by = $1, coins = coins + $2 WHERE id = $3',
-      [referral.user_id, referral.reward_coins, userId]
+      [referral.user_id, rewardCoins, userId]
     );
 
     // Increment referral usage
@@ -120,11 +133,11 @@ async function applyReferralCode(userId, referralCode) {
     // Give coins to referrer
     await client.query(
       'UPDATE users SET coins = coins + $2 WHERE id = $1',
-      [referral.user_id, referral.reward_coins]
+      [referral.user_id, rewardCoins]
     );
 
     await client.query('COMMIT');
-    return { success: true, coinsEarned: referral.reward_coins };
+    return { success: true, coinsEarned: rewardCoins };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -201,6 +214,19 @@ async function convertCoinsToBalance(userId, coins) {
     await client.query(
       'UPDATE users SET coins = coins - $1, balance = balance + $2 WHERE id = $3',
       [coins, balanceToAdd, userId]
+    );
+
+    // Record the conversion so it shows up in transaction history.
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, title, description, amount, type, status, metadata)
+       VALUES ($1, $2, $3, $4, 'COIN_CONVERSION', 'COMPLETED', $5)`,
+      [
+        userId,
+        'Coin conversion',
+        `Converted ${coins} coins to balance`,
+        balanceToAdd,
+        JSON.stringify({ coins, balanceAdded: balanceToAdd, coinsPerUnit }),
+      ]
     );
 
     await client.query('COMMIT');

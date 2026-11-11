@@ -23,4 +23,7 @@ router.post('/transactions', walletController.createTransaction);
 // GET /api/v1/wallet/balance-history - Get balance history
 router.get('/balance-history', walletController.getBalanceHistory);
 
+// GET /api/v1/wallet/coin-config - Coin conversion/invite/product settings
+router.get('/coin-config', walletController.getCoinConfig);
+
 module.exports = router;
