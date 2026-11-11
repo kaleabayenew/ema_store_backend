@@ -356,11 +356,16 @@ async function adjustBalance({ userId, direction, amount, note, adminId }) {
  * so admins can change it; referral coin conversion reads the same value.
  */
 async function getCoinRate() {
-  const { rows } = await pool.query(
-    `SELECT coins_per_unit, updated_at FROM coin_settings WHERE id = 'default'`,
-  );
-  const rate = parseFloat(rows[0]?.coins_per_unit) || 100;
-  return { coinsPerUnit: rate, updatedAt: rows[0]?.updated_at ?? null };
+  try {
+    const { rows } = await pool.query(
+      `SELECT coins_per_unit, updated_at FROM coin_settings WHERE id = 'default'`,
+    );
+    const rate = parseFloat(rows[0]?.coins_per_unit) || 100;
+    return { coinsPerUnit: rate, updatedAt: rows[0]?.updated_at ?? null };
+  } catch {
+    // Table may not exist yet on an older deployment — fall back to default.
+    return { coinsPerUnit: 100, updatedAt: null };
+  }
 }
 
 async function setCoinRate(coinsPerUnit) {
