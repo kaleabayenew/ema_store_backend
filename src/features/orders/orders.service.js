@@ -25,7 +25,7 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
 
         // Query product details
         const { rows: productRows } = await client.query(`
-          SELECT id, stock, price_cents, discount_cents
+          SELECT id, stock, price_cents, discount_cents, coin_price
           FROM products
           WHERE id = $1
         `, [productId]);
@@ -47,12 +47,13 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
           stock: product.stock,
           price_cents: product.price_cents,
           discount_cents: product.discount_cents,
+          coin_price: product.coin_price,
         });
       }
     } else {
       // Get cart items
       const { rows: cartItems } = await client.query(`
-        SELECT ci.*, p.stock, p.price_cents, p.discount_cents
+        SELECT ci.*, p.stock, p.price_cents, p.discount_cents, p.coin_price
         FROM cart_items ci
         JOIN products p ON ci.product_id = p.id
         WHERE ci.user_id = $1
@@ -79,12 +80,57 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       totalCents += price * item.quantity;
     }
 
-    // Create order
+    // ── Wallet payments: COINS or BALANCE ──────────────────────────────
+    // 'COINS'   → every item must have a coin_price; total is in coins.
+    // 'BALANCE' → total is the ETB order total charged from users.balance.
+    const walletPayment = paymentMethod === 'COINS' ? 'COINS'
+      : (paymentMethod === 'BALANCE' || paymentMethod === 'WALLET_BALANCE') ? 'BALANCE'
+      : null;
+
+    let coinsTotal = 0;
+    let coinsPerUnit = 100;
+    let balanceTotal = totalCents / 100;
+
+    if (walletPayment === 'COINS') {
+      const { getCoinSettings } = require('../admin/credits.service');
+      const settings = await getCoinSettings();
+      if (!settings.coinBuyEnabled) {
+        throw new AppError('Coin payments are currently disabled', 403, 'COIN_BUY_DISABLED');
+      }
+      coinsPerUnit = settings.coinsPerUnit || 100;
+      for (const item of itemsToOrder) {
+        const cp = parseInt(item.coin_price, 10);
+        if (!Number.isFinite(cp) || cp <= 0) {
+          throw new AppError('One or more items cannot be bought with coins', 400, 'COIN_PRICE_MISSING');
+        }
+        coinsTotal += cp * item.quantity;
+      }
+    }
+
+    if (walletPayment) {
+      const { rows: userRows } = await client.query(
+        'SELECT coins, balance FROM users WHERE id = $1 FOR UPDATE',
+        [userId]
+      );
+      if (userRows.length === 0) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+      const user = userRows[0];
+      if (walletPayment === 'COINS' && parseInt(user.coins, 10) < coinsTotal) {
+        throw new AppError('Insufficient coins', 400, 'INSUFFICIENT_COINS');
+      }
+      if (walletPayment === 'BALANCE' && parseFloat(user.balance) < balanceTotal) {
+        throw new AppError('Insufficient balance', 400, 'INSUFFICIENT_BALANCE');
+      }
+    }
+
+    // Create order (wallet-paid orders start as PAID)
+    const orderStatus = walletPayment ? 'PAID' : 'PENDING';
     const { rows: orderRows } = await client.query(`
       INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method)
-      VALUES ($1, $2, $3, 'PENDING', $4, $5)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, shippingAddress, paymentMethod]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod]);
 
     const order = orderRows[0];
 
@@ -107,6 +153,41 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // Clear cart only if we used cart items
     if (!directItems) {
       await client.query('DELETE FROM cart_items WHERE user_id = $1', [userId]);
+    }
+
+    // Deduct wallet funds + record the transaction for wallet-paid orders.
+    if (walletPayment === 'COINS') {
+      await client.query(
+        'UPDATE users SET coins = coins - $1 WHERE id = $2',
+        [coinsTotal, userId]
+      );
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, title, description, amount, type, status, metadata)
+         VALUES ($1, $2, $3, $4, 'COIN_PURCHASE', 'COMPLETED', $5)`,
+        [
+          userId,
+          'Coin purchase',
+          `Order ${order.id} paid with ${coinsTotal} coins`,
+          -(coinsTotal / coinsPerUnit),
+          JSON.stringify({ orderId: order.id, coins: coinsTotal, items: itemsToOrder.length }),
+        ]
+      );
+    } else if (walletPayment === 'BALANCE') {
+      await client.query(
+        'UPDATE users SET balance = balance - $1 WHERE id = $2',
+        [balanceTotal, userId]
+      );
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, title, description, amount, type, status, metadata)
+         VALUES ($1, $2, $3, $4, 'BALANCE_PURCHASE', 'COMPLETED', $5)`,
+        [
+          userId,
+          'Balance purchase',
+          `Order ${order.id} paid from balance`,
+          -balanceTotal,
+          JSON.stringify({ orderId: order.id, amountETB: balanceTotal }),
+        ]
+      );
     }
 
     await client.query('COMMIT');

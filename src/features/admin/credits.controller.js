@@ -76,14 +76,38 @@ async function updateCoinRate(req, res, next) {
   }
 }
 
-async function updateCoinSettings(req, res, next) {
+async function coinSettings(req, res, next) {
   try {
-    const { coinsPerUnit, conversionEnabled } = req.body || {};
-    const data = await svc.updateCoinSettings({ coinsPerUnit, conversionEnabled });
+    const data = await svc.getCoinSettings();
     ok(res, data);
   } catch (err) {
     next(err);
   }
 }
 
-module.exports = { listTransactions, listUsers, adjust, summary, coinRate, updateCoinRate, updateCoinSettings };
+async function updateCoinSettings(req, res, next) {
+  try {
+    const { coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled } = req.body || {};
+    const data = await svc.updateCoinSettings({
+      coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled,
+    });
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function productCoinPrice(req, res, next) {
+  try {
+    const { productId, coinPrice } = req.body || {};
+    const data = await svc.setProductCoinPrice(productId, coinPrice);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  listTransactions, listUsers, adjust, summary,
+  coinRate, updateCoinRate, coinSettings, updateCoinSettings, productCoinPrice,
+};

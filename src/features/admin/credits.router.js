@@ -15,5 +15,8 @@ router.post('/credits/adjust', ctrl.adjust);
 router.get('/credits/summary', ctrl.summary);
 router.get('/credits/coin-rate', ctrl.coinRate);
 router.put('/credits/coin-rate', ctrl.updateCoinRate);
+router.get('/credits/coin-settings', ctrl.coinSettings);
+router.put('/credits/coin-settings', ctrl.updateCoinSettings);
+router.put('/credits/product-coin-price', ctrl.productCoinPrice);
 
 module.exports = router;

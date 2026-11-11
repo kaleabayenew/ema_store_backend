@@ -59,7 +59,7 @@ async function getOrder(partnerId, orderId) {
   return { ...order, items };
 }
 
-const PARTNER_ALLOWED_STATUSES = ['CONFIRMED', 'PACKED', 'SHIPPED', 'CANCELLED'];
+const PARTNER_ALLOWED_STATUSES = ['CONFIRMED', 'PACKED', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'CANCELLED'];
 
 async function updateStatus(partnerId, orderId, status) {
   if (!status || !PARTNER_ALLOWED_STATUSES.includes(String(status).toUpperCase())) {

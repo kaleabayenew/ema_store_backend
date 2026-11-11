@@ -1,9 +1,11 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
 async function getProfile(userId) {
   const { rows } = await pool.query(
-    `SELECT * FROM partner_profile WHERE user_id = $1`,
+    `SELECT pp.*,
+       COALESCE((SELECT SUM(amount) FROM wallet_transactions WHERE user_id = $1), 0)::bigint AS balance_cents
+     FROM partner_profile pp WHERE pp.user_id = $1`,
     [userId],
   );
   if (rows.length === 0) throw new AppError('Profile not found.', 404, 'PROFILE_NOT_FOUND');
@@ -11,7 +13,8 @@ async function getProfile(userId) {
 }
 
 async function updateProfile(userId, data) {
-  const ALLOWED = ['shop_name', 'owner_name', 'description', 'address', 'city', 'phone', 'email'];
+  const ALLOWED = ['shop_name', 'owner_name', 'description', 'address', 'delivery_areas', 'city', 'phone', 'email',
+                    'bank_name', 'account_number', 'telebirr_phone', 'is_open', 'opening_days'];
   const fields = [];
   const values = [];
   let idx = 1;
