@@ -1,4 +1,4 @@
-const { AppError } = require('../errors/app_error');
+﻿const { AppError } = require('../errors/app_error');
 
 const isProduction = process.env.NODE_ENV === 'production';
 const isPgError = (code) => typeof code === 'string' && /^[0-9][0-9A-Z]{4}$/.test(code);

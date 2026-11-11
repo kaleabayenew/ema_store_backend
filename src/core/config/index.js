@@ -135,7 +135,7 @@ const allowedOrigins = [
 function isOriginAllowed(origin) {
   if (!origin) return true;
   if (allowedOrigins.includes(origin)) return true;
-  if (!isProduction && LOCALHOST_PATTERN.test(origin)) return true;
+  if (LOCALHOST_PATTERN.test(origin)) return true;
   return false;
 }
 
