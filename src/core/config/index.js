@@ -28,13 +28,13 @@ function resolveJwtSecret() {
     // Refuse to start: a weak secret lets anyone forge login tokens.
     throw new Error(
       `JWT_SECRET is missing or too weak. Set a random value of at least ${MIN_SECRET_LENGTH} characters. ` +
-        'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"',
+      'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"',
     );
   }
 
   console.warn(
     '[config] WARNING: JWT_SECRET is missing or weak. Using an insecure development secret. ' +
-      'Do NOT use this in production.',
+    'Do NOT use this in production.',
   );
   return secret || 'dev-only-insecure-secret-change-me-please-0123456789';
 }
@@ -51,13 +51,13 @@ function resolveOtpHmacSecret() {
   if (isProduction) {
     throw new Error(
       'OTP_HMAC_SECRET is missing, too weak, or equal to JWT_SECRET. ' +
-        'Set a different random value of at least 32 characters.',
+      'Set a different random value of at least 32 characters.',
     );
   }
 
   console.warn(
     '[config] WARNING: OTP_HMAC_SECRET is missing or weak. Using an insecure development secret. ' +
-      'Do NOT use this in production.',
+    'Do NOT use this in production.',
   );
   return 'dev-only-insecure-otp-hmac-secret-change-me-0123456789';
 }
@@ -110,6 +110,7 @@ const productionOrigins = [
   process.env.CUSTOMER_APP_URL_ANDROID,
   process.env.CUSTOMER_APP_URL_IOS,
   process.env.CUSTOMER_APP_URL_WEB,
+  process.env.PARTNER_APP_WEB,
   process.env.ADMIN_WEB_URL,
   ...fromEnvList,
 ].filter(Boolean);
@@ -130,7 +131,7 @@ const allowedOrigins = [
  * Decide if a browser origin may call the API.
  * - no Origin header (mobile app, curl, server-to-server) → allowed
  * - listed origin                                        → allowed
- * - localhost / 127.0.0.1 / 10.0.2.2                     → allowed only outside production
+ * - localhost / 127.0.0.1 / 10.0.2.2                     → always allowed (Flutter web dev)
  */
 function isOriginAllowed(origin) {
   if (!origin) return true;

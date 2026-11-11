@@ -111,6 +111,7 @@ async function autoMigrate() {
       `rating_count INTEGER DEFAULT 0`,
       `sold_count INTEGER DEFAULT 0`,
       `brand_id UUID`,
+      `coin_price INTEGER`,
     ];
     for (const colDef of productColumns) {
       try {
@@ -944,6 +945,18 @@ async function autoMigrate() {
       await pool.query(`
         ALTER TABLE coin_settings
         ADD COLUMN IF NOT EXISTS conversion_enabled BOOLEAN NOT NULL DEFAULT true
+      `);
+      await pool.query(`
+        ALTER TABLE coin_settings
+        ADD COLUMN IF NOT EXISTS invite_gift_enabled BOOLEAN NOT NULL DEFAULT true
+      `);
+      await pool.query(`
+        ALTER TABLE coin_settings
+        ADD COLUMN IF NOT EXISTS invite_gift_coins INTEGER NOT NULL DEFAULT 50
+      `);
+      await pool.query(`
+        ALTER TABLE coin_settings
+        ADD COLUMN IF NOT EXISTS coin_buy_enabled BOOLEAN NOT NULL DEFAULT false
       `);
       console.log('[Migration] ✓ Coin settings table');
     } catch (e) {
