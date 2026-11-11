@@ -927,6 +927,25 @@ async function autoMigrate() {
       console.log('[Migration] ⚠ Wheel slices table:', e.message);
     }
 
+    // Create coin_settings table (coin → balance conversion rate)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS coin_settings (
+          id VARCHAR(50) PRIMARY KEY DEFAULT 'default',
+          coins_per_unit NUMERIC(12, 2) NOT NULL DEFAULT 100,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        INSERT INTO coin_settings (id, coins_per_unit)
+        VALUES ('default', 100)
+        ON CONFLICT (id) DO NOTHING
+      `);
+      console.log('[Migration] ✓ Coin settings table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Coin settings table:', e.message);
+    }
+
     // Create user_coupons table
     try {
       await pool.query(`
