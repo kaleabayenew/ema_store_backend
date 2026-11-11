@@ -76,4 +76,14 @@ async function updateCoinRate(req, res, next) {
   }
 }
 
-module.exports = { listTransactions, listUsers, adjust, summary, coinRate, updateCoinRate };
+async function updateCoinSettings(req, res, next) {
+  try {
+    const { coinsPerUnit, conversionEnabled } = req.body || {};
+    const data = await svc.updateCoinSettings({ coinsPerUnit, conversionEnabled });
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listTransactions, listUsers, adjust, summary, coinRate, updateCoinRate, updateCoinSettings };
