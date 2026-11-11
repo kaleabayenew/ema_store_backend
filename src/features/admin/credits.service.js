@@ -363,6 +363,27 @@ const COIN_SETTINGS_DEFAULTS = {
   coinBuyEnabled: false,
 };
 
+// The startup migration can fail on cold DB connections, leaving the table
+// missing. Ensure it lazily so admin writes never 500.
+async function ensureCoinSettingsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS coin_settings (
+      id VARCHAR(50) PRIMARY KEY DEFAULT 'default',
+      coins_per_unit NUMERIC(12, 2) NOT NULL DEFAULT 100,
+      conversion_enabled BOOLEAN NOT NULL DEFAULT true,
+      invite_gift_enabled BOOLEAN NOT NULL DEFAULT true,
+      invite_gift_coins INTEGER NOT NULL DEFAULT 50,
+      coin_buy_enabled BOOLEAN NOT NULL DEFAULT false,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS conversion_enabled BOOLEAN NOT NULL DEFAULT true`);
+  await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS invite_gift_enabled BOOLEAN NOT NULL DEFAULT true`);
+  await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS invite_gift_coins INTEGER NOT NULL DEFAULT 50`);
+  await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS coin_buy_enabled BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`INSERT INTO coin_settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING`);
+}
+
 async function getCoinSettings() {
   try {
     const { rows } = await pool.query(
@@ -405,6 +426,7 @@ async function updateCoinSettings({
     err.status = 400;
     throw err;
   }
+  await ensureCoinSettingsTable();
   const { rows } = await pool.query(
     `INSERT INTO coin_settings (id, coins_per_unit, conversion_enabled,
         invite_gift_enabled, invite_gift_coins, coin_buy_enabled, updated_at)
@@ -460,6 +482,8 @@ async function setProductCoinPrice(productId, coinPrice) {
     err.status = 400;
     throw err;
   }
+  // coin_price column may be missing if startup migration failed — add lazily.
+  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS coin_price INTEGER`);
   const { rows } = await pool.query(
     `UPDATE products SET coin_price = $2, updated_at = NOW()
       WHERE id = $1
