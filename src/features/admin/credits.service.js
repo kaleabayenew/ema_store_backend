@@ -177,7 +177,13 @@ async function getUsers({ q, role, scope, page = 1, limit = 20 } = {}) {
   };
 
   if (scope === 'staff') {
+    // Only staff who can actually use the Credits page: super admins always,
+    // everyone else needs '/credits' explicitly granted in allowed_pages.
     where.push(`u.role = ANY(${push(STAFF_ROLES)}::text[])`);
+    where.push(`(
+      u.role IN ('SUPER_ADMIN', 'ADMIN')
+      OR au.allowed_pages @> '["/credits"]'::jsonb
+    )`);
   } else {
     where.push(`u.role IN ('CUSTOMER', 'PARTNER', 'RIDE')`);
   }
