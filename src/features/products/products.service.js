@@ -10,6 +10,18 @@ const { AppError } = require('../../core/errors/app_error');
 // 4. Reviews
 // ============================================================================
 
+// coin_price may be missing when the startup migration fails (cold DB).
+// Ensure it once per process so product queries never 500.
+let _coinPriceEnsured = null;
+function ensureCoinPriceColumn() {
+  if (!_coinPriceEnsured) {
+    _coinPriceEnsured = pool
+      .query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS coin_price INTEGER`)
+      .catch(() => {});
+  }
+  return _coinPriceEnsured;
+}
+
 function _formatProductForList(row) {
   const priceCents = parseInt(row.price_cents) || 0;
   const discountCents = parseInt(row.discount_cents) || 0;
@@ -116,6 +128,7 @@ async function getAllProducts({
   offset = 0,
   lean = false,
 } = {}) {
+  await ensureCoinPriceColumn();
   const fromAndWhere = `
     FROM products p
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
@@ -417,6 +430,7 @@ async function _legacy_mapping_getNewArrivals() {
 // ── Get Product by ID ───────────────────────────────────────────────────────
 
 async function getProductById(id) {
+  await ensureCoinPriceColumn();
   const { rows } = await pool.query(
     `SELECT
       p.*,
