@@ -24,8 +24,8 @@ async function listTransactions(req, res, next) {
 
 async function listUsers(req, res, next) {
   try {
-    const { q, role, page, limit } = req.query;
-    const data = await svc.getUsers({ q, role, page, limit });
+    const { q, role, scope, page, limit } = req.query;
+    const data = await svc.getUsers({ q, role, scope, page, limit });
     ok(res, data);
   } catch (err) {
     next(err);
