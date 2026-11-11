@@ -179,15 +179,21 @@ async function convertCoinsToBalance(userId, coins) {
       throw new AppError('Insufficient coins', 400, 'INSUFFICIENT_COINS');
     }
 
-    // Conversion rate from coin_settings (default: 100 coins = 1 Birr)
+    // Conversion rate + on/off switch from coin_settings (default: 100 = 1 Birr)
     let coinsPerUnit = 100;
+    let conversionEnabled = true;
     try {
       const { rows: rateRows } = await client.query(
-        `SELECT coins_per_unit FROM coin_settings WHERE id = 'default'`
+        `SELECT coins_per_unit, conversion_enabled FROM coin_settings WHERE id = 'default'`
       );
       coinsPerUnit = parseFloat(rateRows[0]?.coins_per_unit) || 100;
+      conversionEnabled = rateRows[0]?.conversion_enabled !== false;
     } catch {
       // coin_settings may not exist on older deployments — keep default.
+    }
+    if (!conversionEnabled) {
+      await client.query('ROLLBACK');
+      throw new AppError('Coin conversion is currently disabled', 403, 'COIN_CONVERSION_DISABLED');
     }
     const balanceToAdd = coins / coinsPerUnit;
 
