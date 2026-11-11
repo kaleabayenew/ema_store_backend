@@ -5,8 +5,7 @@ async function getEarnings(partnerId) {
   // Total revenue from completed order items
   const { rows: totalRows } = await pool.query(
     `SELECT COALESCE(SUM(
-       COALESCE(oi.unit_price_cents, CAST(oi.price_at_order * 100 AS INTEGER), 0)
-       * oi.quantity
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
      ), 0)::bigint AS total_revenue
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
@@ -18,8 +17,7 @@ async function getEarnings(partnerId) {
   // This month
   const { rows: thisMonthRows } = await pool.query(
     `SELECT COALESCE(SUM(
-       COALESCE(oi.unit_price_cents, CAST(oi.price_at_order * 100 AS INTEGER), 0)
-       * oi.quantity
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
      ), 0)::bigint AS amount
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
@@ -33,8 +31,7 @@ async function getEarnings(partnerId) {
   // Last month
   const { rows: lastMonthRows } = await pool.query(
     `SELECT COALESCE(SUM(
-       COALESCE(oi.unit_price_cents, CAST(oi.price_at_order * 100 AS INTEGER), 0)
-       * oi.quantity
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
      ), 0)::bigint AS amount
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
@@ -58,8 +55,7 @@ async function getEarnings(partnerId) {
     `SELECT
        DATE_TRUNC('week', o.created_at)::date AS week_start,
        COALESCE(SUM(
-         COALESCE(oi.unit_price_cents, CAST(oi.price_at_order * 100 AS INTEGER), 0)
-         * oi.quantity
+         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
        ), 0)::bigint AS amount
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id

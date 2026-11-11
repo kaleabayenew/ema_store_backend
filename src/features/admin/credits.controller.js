@@ -57,4 +57,23 @@ async function summary(req, res, next) {
   }
 }
 
-module.exports = { listTransactions, listUsers, adjust, summary };
+async function coinRate(req, res, next) {
+  try {
+    const data = await svc.getCoinRate();
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateCoinRate(req, res, next) {
+  try {
+    const { coinsPerUnit } = req.body || {};
+    const data = await svc.setCoinRate(coinsPerUnit);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listTransactions, listUsers, adjust, summary, coinRate, updateCoinRate };

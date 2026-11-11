@@ -29,11 +29,28 @@ const verifyRegister = async (req, res, next) => {
 
 const login = async (req, res, next) => {
   try {
-    const { phone } = req.body;
+    const { phone, password } = req.body;
     if (!phone) {
       return error(res, 'phone is required.', 400, 'MISSING_FIELDS');
     }
+    if (password) {
+      const result = await service.loginWithPassword(phone.trim(), password);
+      return ok(res, result);
+    }
     const result = await service.login(phone.trim());
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const loginWithPassword = async (req, res, next) => {
+  try {
+    const { phone, password } = req.body;
+    if (!phone || !password) {
+      return error(res, 'phone and password are required.', 400, 'MISSING_FIELDS');
+    }
+    const result = await service.loginWithPassword(phone.trim(), password);
     ok(res, result);
   } catch (err) {
     next(err);
@@ -77,4 +94,4 @@ const getMe = async (req, res, next) => {
   }
 };
 
-module.exports = { register, verifyRegister, login, verifyLogin, resendOtp, getMe };
+module.exports = { register, verifyRegister, login, loginWithPassword, verifyLogin, resendOtp, getMe };

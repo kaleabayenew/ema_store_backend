@@ -351,4 +351,33 @@ async function adjustBalance({ userId, direction, amount, note, adminId }) {
   }
 }
 
-module.exports = { getTransactions, getUsers, getSummary, adjustBalance };
+/**
+ * Coin → balance conversion rate (coins per 1 ETB). Stored in coin_settings
+ * so admins can change it; referral coin conversion reads the same value.
+ */
+async function getCoinRate() {
+  const { rows } = await pool.query(
+    `SELECT coins_per_unit, updated_at FROM coin_settings WHERE id = 'default'`,
+  );
+  const rate = parseFloat(rows[0]?.coins_per_unit) || 100;
+  return { coinsPerUnit: rate, updatedAt: rows[0]?.updated_at ?? null };
+}
+
+async function setCoinRate(coinsPerUnit) {
+  const rate = parseFloat(coinsPerUnit);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    const err = new Error('coinsPerUnit must be a positive number');
+    err.status = 400;
+    throw err;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO coin_settings (id, coins_per_unit, updated_at)
+     VALUES ('default', $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET coins_per_unit = $1, updated_at = NOW()
+     RETURNING coins_per_unit, updated_at`,
+    [rate],
+  );
+  return { coinsPerUnit: parseFloat(rows[0].coins_per_unit), updatedAt: rows[0].updated_at };
+}
+
+module.exports = { getTransactions, getUsers, getSummary, adjustBalance, getCoinRate, setCoinRate };

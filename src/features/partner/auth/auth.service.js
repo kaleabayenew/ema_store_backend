@@ -1,3 +1,4 @@
+const bcrypt = require('bcryptjs');
 const { pool } = require('../../../core/config/database');
 const { signToken } = require('../../../core/utils/jwt');
 const { AppError } = require('../../../core/errors/app_error');
@@ -6,6 +7,8 @@ const {
   verifyOtp,
   normalizePhone,
 } = require('../../auth/auth.service');
+
+const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', 10);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Register — Step 1
@@ -96,7 +99,8 @@ async function verifyLogin(phone, otp) {
 
   const { rows } = await pool.query(
     `SELECT users.id, users.phone, users.role, users.is_active, users.is_blocked, users.block_reason,
-            partner_profile.shop_name, partner_profile.owner_name
+            COALESCE(partner_profile.shop_name, partner_profile.business_name, partner_profile.owner_name) AS shop_name,
+            partner_profile.owner_name
      FROM users
      JOIN partner_profile ON partner_profile.user_id = users.id
      WHERE users.phone = $1 AND users.role = 'PARTNER'`,
@@ -124,7 +128,55 @@ async function verifyLogin(phone, otp) {
     token,
     partner: {
       id: user.id,
-      shopName: user.shop_name,
+      shopName: user.shop_name || 'Partner Shop',
+      ownerName: user.owner_name,
+      status: 'ACTIVE',
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Login with Password
+// ─────────────────────────────────────────────────────────────────────────────
+async function loginWithPassword(phone, password) {
+  const normalizedPhone = normalizePhone(phone);
+
+  const { rows } = await pool.query(
+    `SELECT users.id, users.phone, users.role, users.password_hash, users.is_active,
+            users.is_verified, users.is_blocked, users.block_reason,
+            COALESCE(partner_profile.shop_name, partner_profile.business_name, partner_profile.owner_name) AS shop_name,
+            partner_profile.owner_name
+     FROM users
+     JOIN partner_profile ON partner_profile.user_id = users.id
+     WHERE users.phone = $1 AND users.role = 'PARTNER'`,
+    [normalizedPhone],
+  );
+
+  const user = rows[0];
+  const match = await bcrypt.compare(String(password), user?.password_hash || DUMMY_HASH);
+
+  if (!user || !match) {
+    throw new AppError('Invalid phone or password.', 401, 'INVALID_CREDENTIALS');
+  }
+
+  if (user.is_blocked) {
+    throw new AppError(user.block_reason || 'Account blocked.', 403, 'ACCOUNT_BLOCKED');
+  }
+
+  if (!user.is_active) {
+    return { status: 'PENDING', message: 'Account pending admin approval.' };
+  }
+
+  const token = signToken(
+    { id: user.id, role: 'PARTNER', shopName: user.shop_name },
+    { expiresIn: '7d' },
+  );
+
+  return {
+    token,
+    partner: {
+      id: user.id,
+      shopName: user.shop_name || 'Partner Shop',
       ownerName: user.owner_name,
       status: 'ACTIVE',
     },
@@ -148,7 +200,11 @@ async function getMe(userId) {
     throw new AppError('Partner not found.', 404, 'USER_NOT_FOUND');
   }
 
-  return rows[0];
+  const p = rows[0];
+  return {
+    ...p,
+    shop_name: p.shop_name || p.business_name || p.owner_name,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,4 +216,4 @@ async function resendOtp(phone, type) {
   return { message: 'OTP resent.' };
 }
 
-module.exports = { register, verifyRegister, login, verifyLogin, getMe, resendOtp };
+module.exports = { register, verifyRegister, login, verifyLogin, loginWithPassword, getMe, resendOtp };

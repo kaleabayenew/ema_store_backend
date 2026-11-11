@@ -19,8 +19,7 @@ async function getStats(partnerId) {
   // Total revenue (sum of completed order items)
   const { rows: revenueRows } = await pool.query(
     `SELECT COALESCE(SUM(
-       COALESCE(order_items.unit_price_cents, CAST(order_items.price_at_order * 100 AS INTEGER), 0)
-       * order_items.quantity
+       ROUND(COALESCE(order_items.price_at_order, 0) * 100) * order_items.quantity
      ), 0)::bigint AS total
      FROM order_items
      JOIN products ON products.id = order_items.product_id
@@ -43,8 +42,7 @@ async function getStats(partnerId) {
     `SELECT
        DATE(orders.created_at) AS date,
        COALESCE(SUM(
-         COALESCE(order_items.unit_price_cents, CAST(order_items.price_at_order * 100 AS INTEGER), 0)
-         * order_items.quantity
+         ROUND(COALESCE(order_items.price_at_order, 0) * 100) * order_items.quantity
        ), 0)::bigint AS amount
      FROM order_items
      JOIN products ON products.id = order_items.product_id
