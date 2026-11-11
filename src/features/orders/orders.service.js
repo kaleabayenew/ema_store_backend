@@ -9,6 +9,12 @@ const { AppError } = require('../../core/errors/app_error');
 // ── Create Order from Cart or Direct Items ─────────────────────────────────
 
 async function createOrder(userId, shippingAddress, paymentMethod, directItems = null) {
+  // coin_price may be missing if startup migration failed — add lazily so
+  // order queries never break.
+  try {
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS coin_price INTEGER`);
+  } catch (e) { /* best-effort */ }
+
   const client = await pool.connect();
 
   try {
