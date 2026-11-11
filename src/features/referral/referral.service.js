@@ -179,8 +179,12 @@ async function convertCoinsToBalance(userId, coins) {
       throw new AppError('Insufficient coins', 400, 'INSUFFICIENT_COINS');
     }
 
-    // Conversion rate: 100 coins = 1 Birr
-    const balanceToAdd = coins / 100;
+    // Conversion rate from coin_settings (default: 100 coins = 1 Birr)
+    const { rows: rateRows } = await client.query(
+      `SELECT coins_per_unit FROM coin_settings WHERE id = 'default'`
+    );
+    const coinsPerUnit = parseFloat(rateRows[0]?.coins_per_unit) || 100;
+    const balanceToAdd = coins / coinsPerUnit;
 
     // Update user's balance and coins
     await client.query(
