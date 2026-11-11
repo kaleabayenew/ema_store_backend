@@ -1,133 +1,138 @@
-// src/features/wishlist/wishlist.service.js
+const { pool } = require('../../../core/config/database');
+const { AppError } = require('../../../core/errors/app_error');
 
-const { pool } = require('../../core/config/database');
+async function getEarnings(partnerId) {
+  // Total revenue from completed order items
+  const { rows: totalRows } = await pool.query(
+    `SELECT COALESCE(SUM(
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+     ), 0)::bigint AS total_revenue
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     JOIN orders o ON o.id = oi.order_id
+     WHERE p.partner_id = $1 AND o.status = 'COMPLETED'`,
+    [partnerId],
+  );
 
-// wishlist.created_at may be missing on older schemas (failed migration).
-// Ensure it once per process so wishlist queries never 500.
-let _wishlistEnsured = null;
-function ensureWishlistColumns() {
-  if (!_wishlistEnsured) {
-    _wishlistEnsured = pool
-      .query(`ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
-      .catch(() => {});
-  }
-  return _wishlistEnsured;
+  // This month
+  const { rows: thisMonthRows } = await pool.query(
+    `SELECT COALESCE(SUM(
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+     ), 0)::bigint AS amount
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     JOIN orders o ON o.id = oi.order_id
+     WHERE p.partner_id = $1
+       AND o.status = 'COMPLETED'
+       AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())`,
+    [partnerId],
+  );
+
+  // Last month
+  const { rows: lastMonthRows } = await pool.query(
+    `SELECT COALESCE(SUM(
+       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+     ), 0)::bigint AS amount
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     JOIN orders o ON o.id = oi.order_id
+     WHERE p.partner_id = $1
+       AND o.status = 'COMPLETED'
+       AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')`,
+    [partnerId],
+  );
+
+  // Pending payout from wallet — amount is stored as-is (same unit as revenue cents)
+  const { rows: pendingRows } = await pool.query(
+    `SELECT COALESCE(SUM(ABS(amount)), 0)::bigint AS pending
+     FROM wallet_transactions
+     WHERE user_id = $1 AND type = 'PAYOUT_REQUEST' AND status = 'PENDING'`,
+    [partnerId],
+  );
+
+  // Weekly earnings chart — last 4 ISO weeks (Mon–Sun), revenue in cents
+  const { rows: chartRows } = await pool.query(
+    `SELECT
+       DATE_TRUNC('week', o.created_at)::date AS week_start,
+       COALESCE(SUM(
+         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+       ), 0)::bigint AS amount
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     JOIN orders o ON o.id = oi.order_id
+     WHERE p.partner_id = $1
+       AND o.status = 'COMPLETED'
+       AND o.created_at >= NOW() - INTERVAL '4 weeks'
+     GROUP BY week_start
+     ORDER BY week_start ASC`,
+    [partnerId],
+  );
+
+  return {
+    totalRevenueCents: Number(totalRows[0].total_revenue),
+    thisMonthCents: Number(thisMonthRows[0].amount),
+    lastMonthCents: Number(lastMonthRows[0].amount),
+    pendingPayoutCents: Number(pendingRows[0].pending),
+    weeklyChart: chartRows.map((r) => ({ weekStart: r.week_start, amount: Number(r.amount) })),
+  };
 }
 
-class WishlistService {
-  // Get user's wishlist
-  async getUserWishlist(userId) {
-    await ensureWishlistColumns();
-    const query = `
-      SELECT
-        w.product_id,
-        w.created_at,
-        p.id,
-        COALESCE(p.name_en, p.name) AS name,
-        COALESCE(p.description_en, p.description) AS description,
-        p.price_cents,
-        p.discount_cents,
-        COALESCE(pi.image_url, p.image_url) AS image_url,
-        p.rating_avg AS rating,
-        p.rating_count AS review_count,
-        p.stock
-      FROM wishlist w
-      JOIN products p ON w.product_id = p.id
-      LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
-      WHERE w.user_id = $1
-      ORDER BY w.created_at DESC
-    `;
+async function getTransactions(partnerId, { page = 1, limit = 20 } = {}) {
+  const offset = (page - 1) * limit;
 
-    const result = await pool.query(query, [userId]);
+  const { rows: countRows } = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM wallet_transactions WHERE user_id = $1`,
+    [partnerId],
+  );
 
-    return {
-      success: true,
-      items: result.rows.map(row => ({
-        productId: row.product_id,
-        createdAt: row.created_at,
-        product: {
-          id: row.id,
-          name: row.name,
-          description: row.description,
-          priceCents: parseInt(row.price_cents),
-          discountCents: row.discount_cents ? parseInt(row.discount_cents) : null,
-          imageUrl: row.image_url,
-          rating: row.rating ? parseFloat(row.rating) : 0,
-          reviewCount: row.review_count ? parseInt(row.review_count) : 0,
-          stock: row.stock ? parseInt(row.stock) : 0
-        }
-      }))
-    };
-  }
+  const { rows } = await pool.query(
+    `SELECT * FROM wallet_transactions WHERE user_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [partnerId, limit, offset],
+  );
 
-  // Add product to wishlist
-  async addToWishlist(userId, productId) {
-    const query = `
-      INSERT INTO wishlist (user_id, product_id)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id, product_id) DO NOTHING
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, [userId, productId]);
-
-    return {
-      success: true,
-      message: result.rows.length > 0 ? 'Added to wishlist' : 'Already in wishlist',
-      item: result.rows[0]
-    };
-  }
-
-  // Remove product from wishlist
-  async removeFromWishlist(userId, productId) {
-    const query = `
-      DELETE FROM wishlist
-      WHERE user_id = $1 AND product_id = $2
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, [userId, productId]);
-
-    if (result.rows.length === 0) {
-      throw new Error('Item not found in wishlist');
-    }
-
-    return {
-      success: true,
-      message: 'Removed from wishlist'
-    };
-  }
-
-  // Check if product is in wishlist
-  async isInWishlist(userId, productId) {
-    const query = `
-      SELECT 1
-      FROM wishlist
-      WHERE user_id = $1 AND product_id = $2
-    `;
-
-    const result = await pool.query(query, [userId, productId]);
-
-    return {
-      success: true,
-      inWishlist: result.rows.length > 0
-    };
-  }
-
-  // Clear wishlist
-  async clearWishlist(userId) {
-    const query = `
-      DELETE FROM wishlist
-      WHERE user_id = $1
-    `;
-
-    await pool.query(query, [userId]);
-
-    return {
-      success: true,
-      message: 'Wishlist cleared'
-    };
-  }
+  return { transactions: rows, total: countRows[0].total, page, limit };
 }
 
-module.exports = new WishlistService();
+async function requestPayout(partnerId, amount, details = {}) {
+  if (!amount || amount <= 0) {
+    throw new AppError('Invalid payout amount.', 400, 'INVALID_AMOUNT');
+  }
+
+  const method = details.method === 'telebirr' ? 'telebirr' : 'bank';
+  const description = method === 'telebirr'
+    ? `Telebirr: ${details.telebirrPhone || ''}`
+    : `Bank: ${details.bankName || ''} — Acct: ${details.accountNumber || ''}`;
+
+  const { rows } = await pool.query(
+    `INSERT INTO wallet_transactions (user_id, amount, title, description, type, status, metadata)
+     VALUES ($1, $2, 'Payout Request', $3, 'PAYOUT_REQUEST', 'PENDING', $4)
+     RETURNING *`,
+    [partnerId, amount, description, JSON.stringify({ method, ...details })],
+  );
+  return rows[0];
+}
+
+async function requestTransfer(partnerId, { amount, recipientPhone, method, accountNumber }) {
+  if (!amount || amount <= 0) {
+    throw new AppError('Invalid transfer amount.', 400, 'INVALID_AMOUNT');
+  }
+  if (!recipientPhone && !accountNumber) {
+    throw new AppError('Recipient phone or account number is required.', 400, 'MISSING_FIELDS');
+  }
+
+  const isBank = method === 'bank';
+  const destination = isBank ? `Bank acct: ${accountNumber || ''}` : `Telebirr: ${recipientPhone || ''}`;
+  const description = `Transfer to ${destination}`;
+
+  const { rows } = await pool.query(
+    `INSERT INTO wallet_transactions (user_id, amount, title, description, type, status, metadata)
+     VALUES ($1, $2, 'Transfer Request', $3, 'TRANSFER_REQUEST', 'PENDING', $4)
+     RETURNING *`,
+    [partnerId, amount, description, JSON.stringify({ method: isBank ? 'bank' : 'telebirr', recipientPhone, accountNumber })],
+  );
+  return rows[0];
+}
+
+module.exports = { getEarnings, getTransactions, requestPayout, requestTransfer };
