@@ -158,17 +158,29 @@ async function getSummary() {
   return { totalBalance, totalCoins, byRole };
 }
 
+const STAFF_ROLES = [
+  'ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER', 'MANAGEMENT',
+  'PARTNER_MANAGER', 'PRODUCT_MANAGER', 'FINANCE', 'MARKETING',
+];
+
 /**
- * List all wallet users (customers, partners, riders) with their balances,
- * coins and transaction stats — powers the admin Credits "All users" table.
+ * List wallet users with their balances, coins and transaction stats.
+ * scope 'staff' returns admin/staff accounts (for the Super Admin "Stuff"
+ * panel); default scope returns customers, partners and riders.
  */
-async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
-  const where = [`u.role IN ('CUSTOMER', 'PARTNER', 'RIDE')`];
+async function getUsers({ q, role, scope, page = 1, limit = 20 } = {}) {
+  const where = [];
   const params = [];
   const push = (value) => {
     params.push(value);
     return `$${params.length}`;
   };
+
+  if (scope === 'staff') {
+    where.push(`u.role = ANY(${push(STAFF_ROLES)}::text[])`);
+  } else {
+    where.push(`u.role IN ('CUSTOMER', 'PARTNER', 'RIDE')`);
+  }
 
   if (q && q.trim()) {
     const like = push(`%${q.trim()}%`);
@@ -192,6 +204,7 @@ async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
     FROM users u
     LEFT JOIN customer_user cu ON cu.user_id = u.id
     LEFT JOIN partner_profile pp ON pp.user_id = u.id
+    LEFT JOIN admin_user au ON au.user_id = u.id
     LEFT JOIN LATERAL (
       SELECT COUNT(*)::int AS tx_count, MAX(wt.created_at) AS last_at
       FROM wallet_transactions wt WHERE wt.user_id = u.id
@@ -203,6 +216,8 @@ async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
     pool.query(
       `SELECT
          u.id, u.role, u.phone, u.email, u.balance, u.coins, u.created_at,
+         u.is_active, u.is_blocked,
+         au.admin_role, au.allowed_pages,
          COALESCE(cu.full_name, pp.business_name, pp.owner_name, u.full_name, u.phone) AS display_name,
          COALESCE(tx.tx_count, 0) AS tx_count,
          tx.last_at
@@ -218,11 +233,14 @@ async function getUsers({ q, role, page = 1, limit = 20 } = {}) {
     users: rowsRes.rows.map((r) => ({
       id: r.id,
       role: r.role,
+      adminRole: r.admin_role ?? null,
+      allowedPages: Array.isArray(r.allowed_pages) ? r.allowed_pages : [],
       phone: r.phone,
       email: r.email,
       name: r.display_name || 'Unknown',
       balance: parseFloat(r.balance) || 0,
       coins: r.coins || 0,
+      status: r.is_blocked ? 'INACTIVE' : (r.is_active ? 'ACTIVE' : 'INACTIVE'),
       transactionCount: r.tx_count || 0,
       lastActivityAt: r.last_at,
       createdAt: r.created_at,
@@ -257,7 +275,7 @@ async function adjustBalance({ userId, direction, amount, note, adminId }) {
 
     const { rows: userRows } = await client.query(
       `SELECT id, role, balance FROM users
-        WHERE id = $1 AND role IN ('CUSTOMER', 'PARTNER', 'RIDE')
+        WHERE id = $1
         FOR UPDATE`,
       [userId],
     );
