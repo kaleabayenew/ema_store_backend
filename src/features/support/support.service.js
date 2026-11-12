@@ -61,6 +61,11 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
       await client.query(`UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`, [ticket.id]);
     }
 
+    if (ticket && subject && subject.toLowerCase().includes('partner') && !ticket.subject.toLowerCase().includes('partner')) {
+      await client.query(`UPDATE support_tickets SET subject = $1 WHERE id = $2`, [subject, ticket.id]);
+      ticket.subject = subject;
+    }
+
     const messageRes = await client.query(
       `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
        VALUES ($1, $2, $3, $4, false)
@@ -153,7 +158,7 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
     idx++;
   }
   if (search) {
-    where += ` AND (t.subject ILIKE $${idx} OR COALESCE(cu.full_name, u.phone, t.guest_id) ILIKE $${idx} OR t.id::text ILIKE $${idx})`;
+    where += ` AND (t.subject ILIKE $${idx} OR COALESCE(pp.shop_name, cu.full_name, u.phone, t.guest_id) ILIKE $${idx} OR t.id::text ILIKE $${idx})`;
     params.push(`%${search}%`);
     idx++;
   }
@@ -167,6 +172,7 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
      FROM support_tickets t
      LEFT JOIN users u         ON u.id = t.user_id
      LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
      ${where}`,
     params,
   );
@@ -175,7 +181,9 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
   const { rows } = await pool.query(
     `SELECT
        t.id, t.subject, t.status, t.priority, t.created_at, t.updated_at,
-       COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
+       u.role                          AS user_role,
+       pp.shop_name                    AS shop_name,
+       COALESCE(pp.shop_name, cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
        u.phone                         AS customer_phone,
        t.guest_id                      AS guest_id,
        COUNT(m.id)::int                AS message_count,
@@ -189,9 +197,10 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
      FROM support_tickets t
      LEFT JOIN users u              ON u.id = t.user_id
      LEFT JOIN customer_user cu     ON cu.user_id = t.user_id
+     LEFT JOIN partner_profile pp   ON pp.user_id = t.user_id
      LEFT JOIN support_messages m   ON m.ticket_id = t.id
      ${where}
-     GROUP BY t.id, cu.full_name, u.phone
+     GROUP BY t.id, cu.full_name, u.phone, u.role, pp.shop_name
      ORDER BY
        CASE t.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
        latest_activity DESC
@@ -200,20 +209,26 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
   );
 
   return {
-    tickets: rows.map((r) => ({
-      id:            r.id,
-      subject:       r.subject,
-      status:        r.status,
-      priority:      r.priority,
-      customerName:  r.customer_name ?? 'Guest',
-      customerPhone: r.customer_phone ?? '',
-      guestId:       r.guest_id ?? null,
-      isGuest:       !r.customer_phone && !!r.guest_id,
-      messageCount:  r.message_count,
-      unreadCount:   r.unread_count,
-      createdAt:     r.created_at,
-      updatedAt:     r.updated_at,
-    })),
+    tickets: rows.map((r) => {
+      const isPartner = r.user_role === 'PARTNER' || !!r.shop_name || (r.subject && r.subject.toLowerCase().includes('partner'));
+      return {
+        id:            r.id,
+        subject:       r.subject,
+        status:        r.status,
+        priority:      r.priority,
+        customerName:  r.customer_name ?? (isPartner ? 'Partner' : 'Guest'),
+        customerPhone: r.customer_phone ?? '',
+        guestId:       r.guest_id ?? null,
+        isGuest:       !r.customer_phone && !!r.guest_id,
+        isPartner:     isPartner,
+        userRole:      r.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER'),
+        shopName:      r.shop_name ?? null,
+        messageCount:  r.message_count,
+        unreadCount:   r.unread_count,
+        createdAt:     r.created_at,
+        updatedAt:     r.updated_at,
+      };
+    }),
     total:      parseInt(agg.total),
     open:       parseInt(agg.open_count),
     inProgress: parseInt(agg.in_progress_count),
@@ -229,12 +244,15 @@ async function getTicket(id) {
   const { rows } = await pool.query(
     `SELECT
        t.*,
-       COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
+       u.role                          AS user_role,
+       pp.shop_name                    AS shop_name,
+       COALESCE(pp.shop_name, cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
        u.phone                         AS customer_phone,
        u.email                         AS customer_email
      FROM support_tickets t
      LEFT JOIN users u         ON u.id = t.user_id
      LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
      WHERE t.id = $1`,
     [id],
   );
@@ -244,11 +262,14 @@ async function getTicket(id) {
     `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at, m.guest_id, m.image_url,
             CASE
               WHEN m.is_staff = true THEN COALESCE(au.full_name, 'Support')
+              WHEN u.role = 'PARTNER' THEN COALESCE(pp.shop_name, 'Partner')
               ELSE COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(m.guest_id, 6), 'Customer')
-            END AS sender_name
+            END AS sender_name,
+            u.role AS sender_role
      FROM support_messages m
      LEFT JOIN users u         ON u.id = m.sender_id
      LEFT JOIN customer_user cu ON cu.user_id = m.sender_id
+     LEFT JOIN partner_profile pp ON pp.user_id = m.sender_id
      LEFT JOIN admin_user au    ON au.user_id = m.sender_id
      WHERE m.ticket_id = $1
      ORDER BY m.sent_at ASC`,
@@ -256,6 +277,7 @@ async function getTicket(id) {
   );
 
   const t = rows[0];
+  const isPartner = t.user_role === 'PARTNER' || !!t.shop_name || (t.subject && t.subject.toLowerCase().includes('partner'));
   
   // Generate fresh presigned URLs for all images
   const messagesWithFreshUrls = await Promise.all(
@@ -278,10 +300,13 @@ async function getTicket(id) {
     subject:       t.subject,
     status:        t.status,
     priority:      t.priority,
-    customerName:  t.customer_name ?? 'Guest',
+    customerName:  t.customer_name ?? (isPartner ? 'Partner' : 'Guest'),
     customerPhone: t.customer_phone ?? '',
     customerEmail: t.customer_email ?? '',
     guestId:       t.guest_id ?? null,
+    isPartner:     isPartner,
+    userRole:      t.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER'),
+    shopName:      t.shop_name ?? null,
     createdAt:     t.created_at,
     updatedAt:     t.updated_at,
     messages: messagesWithFreshUrls.map((m) => ({
@@ -292,6 +317,7 @@ async function getTicket(id) {
       sentAt:     m.sent_at,
       readAt:     m.read_at,
       imageUrl:   m.image_url || null,
+      isPartner:  m.sender_role === 'PARTNER' || (!m.is_staff && isPartner),
     })),
   };
 }
