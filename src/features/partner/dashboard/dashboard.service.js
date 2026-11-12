@@ -1,4 +1,4 @@
-const { pool } = require('../../../core/config/database');
+﻿const { pool } = require('../../../core/config/database');
 
 async function getStats(partnerId) {
   // Execute all dashboard queries in parallel to minimize latency

@@ -1,4 +1,4 @@
-const { pool } = require('../../../core/config/database');
+﻿const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
 // Ensure reply_text column exists

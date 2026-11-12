@@ -1,4 +1,4 @@
-const service = require('./earnings.service');
+﻿const service = require('./earnings.service');
 const { ok, error } = require('../../../core/utils/response');
 
 const getEarnings = async (req, res, next) => {

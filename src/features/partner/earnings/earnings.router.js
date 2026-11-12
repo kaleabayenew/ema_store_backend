@@ -1,4 +1,4 @@
-const { Router } = require('express');
+﻿const { Router } = require('express');
 const ctrl = require('./earnings.controller');
 const { requireAuth, requirePartner } = require('../../../core/middleware/auth');
 
