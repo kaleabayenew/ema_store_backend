@@ -1,4 +1,4 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
 // Ensure reply_text column exists
@@ -10,26 +10,27 @@ ensureSchema().catch(err => console.warn('[Partner Reviews] Schema init:', err.m
 async function getReviews(partnerId, { page = 1, limit = 20 } = {}) {
   const offset = (page - 1) * limit;
 
-  const { rows: countRows } = await pool.query(
-    `SELECT COUNT(*)::int AS total
-     FROM reviews
-     JOIN products ON products.id = reviews.product_id
-     WHERE products.partner_id = $1`,
-    [partnerId],
-  );
+  const [countRes, rowsRes] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM reviews
+       JOIN products ON products.id = reviews.product_id
+       WHERE products.partner_id = $1`,
+      [partnerId],
+    ),
+    pool.query(
+      `SELECT reviews.*, products.name_en, COALESCE(users.full_name, users.phone, 'Customer') AS customer_name
+       FROM reviews
+       JOIN products ON products.id = reviews.product_id
+       LEFT JOIN users ON users.id = COALESCE(reviews.customer_id, reviews.user_id)
+       WHERE products.partner_id = $1
+       ORDER BY reviews.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [partnerId, limit, offset],
+    ),
+  ]);
 
-  const { rows } = await pool.query(
-    `SELECT reviews.*, products.name_en, users.phone
-     FROM reviews
-     JOIN products ON products.id = reviews.product_id
-     JOIN users ON users.id = reviews.customer_id
-     WHERE products.partner_id = $1
-     ORDER BY reviews.created_at DESC
-     LIMIT $2 OFFSET $3`,
-    [partnerId, limit, offset],
-  );
-
-  return { reviews: rows, total: countRows[0].total, page, limit };
+  return { reviews: rowsRes.rows, total: countRes.rows[0]?.total ?? 0, page, limit };
 }
 
 async function replyToReview(partnerId, reviewId, replyText) {
