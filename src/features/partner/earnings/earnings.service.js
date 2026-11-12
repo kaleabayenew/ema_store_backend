@@ -2,78 +2,83 @@ const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
 async function getEarnings(partnerId) {
-  // Total revenue from completed order items
-  const { rows: totalRows } = await pool.query(
-    `SELECT COALESCE(SUM(
-       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
-     ), 0)::bigint AS total_revenue
-     FROM order_items oi
-     JOIN products p ON p.id = oi.product_id
-     JOIN orders o ON o.id = oi.order_id
-     WHERE p.partner_id = $1 AND o.status = 'COMPLETED'`,
-    [partnerId],
-  );
-
-  // This month
-  const { rows: thisMonthRows } = await pool.query(
-    `SELECT COALESCE(SUM(
-       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
-     ), 0)::bigint AS amount
-     FROM order_items oi
-     JOIN products p ON p.id = oi.product_id
-     JOIN orders o ON o.id = oi.order_id
-     WHERE p.partner_id = $1
-       AND o.status = 'COMPLETED'
-       AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())`,
-    [partnerId],
-  );
-
-  // Last month
-  const { rows: lastMonthRows } = await pool.query(
-    `SELECT COALESCE(SUM(
-       ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
-     ), 0)::bigint AS amount
-     FROM order_items oi
-     JOIN products p ON p.id = oi.product_id
-     JOIN orders o ON o.id = oi.order_id
-     WHERE p.partner_id = $1
-       AND o.status = 'COMPLETED'
-       AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')`,
-    [partnerId],
-  );
-
-  // Pending payout from wallet — amount is stored as-is (same unit as revenue cents)
-  const { rows: pendingRows } = await pool.query(
-    `SELECT COALESCE(SUM(ABS(amount)), 0)::bigint AS pending
-     FROM wallet_transactions
-     WHERE user_id = $1 AND type = 'PAYOUT_REQUEST' AND status = 'PENDING'`,
-    [partnerId],
-  );
-
-  // Weekly earnings chart — last 4 ISO weeks (Mon–Sun), revenue in cents
-  const { rows: chartRows } = await pool.query(
-    `SELECT
-       DATE_TRUNC('week', o.created_at)::date AS week_start,
-       COALESCE(SUM(
+  // Execute all earnings queries in parallel
+  const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes] = await Promise.all([
+    // Total revenue from completed order items
+    pool.query(
+      `SELECT COALESCE(SUM(
+         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+       ), 0)::bigint AS total_revenue
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1 AND o.status = 'COMPLETED'`,
+      [partnerId],
+    ),
+    // This month
+    pool.query(
+      `SELECT COALESCE(SUM(
          ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
        ), 0)::bigint AS amount
-     FROM order_items oi
-     JOIN products p ON p.id = oi.product_id
-     JOIN orders o ON o.id = oi.order_id
-     WHERE p.partner_id = $1
-       AND o.status = 'COMPLETED'
-       AND o.created_at >= NOW() - INTERVAL '4 weeks'
-     GROUP BY week_start
-     ORDER BY week_start ASC`,
-    [partnerId],
-  );
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1
+         AND o.status = 'COMPLETED'
+         AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())`,
+      [partnerId],
+    ),
+    // Last month
+    pool.query(
+      `SELECT COALESCE(SUM(
+         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+       ), 0)::bigint AS amount
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1
+         AND o.status = 'COMPLETED'
+         AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')`,
+      [partnerId],
+    ),
+    // Pending payout from wallet — amount is stored as-is (same unit as revenue cents)
+    pool.query(
+      `SELECT COALESCE(SUM(ABS(amount)), 0)::bigint AS pending
+       FROM wallet_transactions
+       WHERE user_id = $1 AND type = 'PAYOUT_REQUEST' AND status = 'PENDING'`,
+      [partnerId],
+    ),
+    // Weekly earnings chart — last 4 ISO weeks (Mon–Sun), revenue in cents
+    pool.query(
+      `SELECT
+         DATE_TRUNC('week', o.created_at)::date AS week_start,
+         COALESCE(SUM(
+           ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+         ), 0)::bigint AS amount
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1
+         AND o.status = 'COMPLETED'
+         AND o.created_at >= NOW() - INTERVAL '4 weeks'
+       GROUP BY week_start
+       ORDER BY week_start ASC`,
+      [partnerId],
+    ),
+  ]);
+
+  const totalRev = Number(totalRes.rows[0]?.total_revenue ?? 0);
+  const pending = Number(pendingRes.rows[0]?.pending ?? 0);
+  const available = Math.max(0, totalRev - pending);
 
   return {
-    totalRevenueCents: Number(totalRows[0].total_revenue),
-    thisMonthCents: Number(thisMonthRows[0].amount),
-    lastMonthCents: Number(lastMonthRows[0].amount),
-    pendingPayoutCents: Number(pendingRows[0].pending),
-    weeklyChart: chartRows.map((r) => ({ weekStart: r.week_start, amount: Number(r.amount) })),
+    totalRevenueCents: totalRev,
+    thisMonthCents: Number(thisMonthRes.rows[0]?.amount ?? 0),
+    lastMonthCents: Number(lastMonthRes.rows[0]?.amount ?? 0),
+    pendingPayoutCents: pending,
+    available_balance: available / 100, // ETB
+    balance: totalRev / 100, // ETB for app compatibility
+    weeklyChart: chartRes.rows.map((r) => ({ weekStart: r.week_start, amount: Number(r.amount) })),
   };
 }
 
