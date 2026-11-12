@@ -1040,6 +1040,24 @@ async function autoMigrate() {
     } catch (e) {
       console.log('[Migration] ⚠ About content table:', e.message);
     }
+
+    // Performance indexes for fast reads on partner data & joins
+    try {
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_partner_id ON products(partner_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_partner_created ON products(partner_id, created_at DESC)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_product_id ON order_items(product_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_images_product_id ON product_images(product_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_partner_profile_user_id ON partner_profile(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_admin_user_user_id ON admin_user(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_partner_promotions_partner_id ON partner_promotions(partner_id)`);
+      console.log('[Migration] ✓ Partner performance indexes');
+    } catch (e) {
+      console.log('[Migration] ⚠ Partner indexes:', e.message);
+    }
   } catch (error) {
     console.error('[Migration] ❌ Auto-migration failed:', error.message);
     // Don't exit - let the server start anyway
