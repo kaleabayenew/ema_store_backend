@@ -1,33 +1,32 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
-async function getProducts(partnerId, { page = 1, limit = 20, search } = {}) {
+async function getProducts(partnerId, { page = 1, limit = 50, search } = {}) {
   const offset = (page - 1) * limit;
-  const params = [partnerId];
+  const countParams = [partnerId];
   let where = `WHERE p.partner_id = $1`;
 
   if (search) {
-    params.push(`%${search}%`);
-    where += ` AND (p.name_en ILIKE $${params.length} OR p.description_en ILIKE $${params.length})`;
+    countParams.push(`%${search}%`);
+    where += ` AND (p.name_en ILIKE $${countParams.length} OR p.description_en ILIKE $${countParams.length})`;
   }
 
-  const { rows: countRows } = await pool.query(
-    `SELECT COUNT(*)::int AS total FROM products p ${where}`,
-    params,
-  );
+  const queryParams = [...countParams, limit, offset];
 
-  params.push(limit, offset);
-  const { rows } = await pool.query(
-    `SELECT p.*, pi.image_url AS primary_image_url
-     FROM products p
-     LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
-     ${where}
-     ORDER BY p.created_at DESC
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
-  );
+  const [countRes, rowsRes] = await Promise.all([
+    pool.query(`SELECT COUNT(*)::int AS total FROM products p ${where}`, countParams),
+    pool.query(
+      `SELECT p.*, pi.image_url AS primary_image_url
+       FROM products p
+       LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
+       ${where}
+       ORDER BY p.created_at DESC
+       LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
+      queryParams,
+    ),
+  ]);
 
-  return { products: rows, total: countRows[0].total, page, limit };
+  return { products: rowsRes.rows, total: countRes.rows[0]?.total ?? 0, page, limit };
 }
 
 async function getProduct(partnerId, productId) {
