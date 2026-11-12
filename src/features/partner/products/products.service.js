@@ -29,10 +29,18 @@ function _mapProduct(row, { images = [], variants = [] } = {}) {
     stock: Number(row.stock ?? row.stock_quantity) || 0,
     sales: Number(row.sold_count) || 0,
     visible: row.is_visible !== false,
-    status: row.status || 'PENDING',
-    variants: variants.map((v) =>
-      v.value ? `${v.name} / ${v.value}` : (v.name || ''),
-    ),
+    status: ['PENDING', 'APPROVED', 'REJECTED'].includes(row.status)
+      ? row.status
+      : row.status === 'ACTIVE'
+        ? 'APPROVED'
+        : 'PENDING',
+    variants: variants.map((v) => {
+      const attr = v.attributes && typeof v.attributes === 'object'
+        ? v.attributes
+        : {};
+      const val = attr.value || attr.option || '';
+      return val ? `${v.name} / ${val}` : (v.name || '');
+    }),
     imageUrls,
     createdAt: row.created_at,
   };
@@ -49,8 +57,9 @@ async function _attachRelations(rows) {
       [ids],
     ),
     pool.query(
-      `SELECT product_id, name, value FROM product_variants
-       WHERE product_id = ANY($1::uuid[]) ORDER BY created_at`,
+      `SELECT product_id, name, attributes FROM product_variants
+       WHERE product_id = ANY($1::uuid[]) AND is_active IS NOT FALSE
+       ORDER BY created_at`,
       [ids],
     ),
   ]);
@@ -129,11 +138,12 @@ async function _replaceVariants(client, productId, variants) {
     if (!str) continue;
     // Accept "Name / Value" or plain string
     const parts = str.split('/').map((s) => s.trim());
-    const name = parts.length > 1 ? parts[0] : str;
-    const value = parts.length > 1 ? parts.slice(1).join(' / ') : '';
+    const name = (parts.length > 1 ? parts[0] : str).slice(0, 100) || 'Option';
+    const value = parts.length > 1 ? parts.slice(1).join(' / ').slice(0, 100) : '';
     await client.query(
-      `INSERT INTO product_variants (product_id, name, value) VALUES ($1, $2, $3)`,
-      [productId, name, value],
+      `INSERT INTO product_variants (product_id, name, attributes, is_active)
+       VALUES ($1, $2, $3::jsonb, true)`,
+      [productId, name, JSON.stringify(value ? { value } : {})],
     );
   }
 }
