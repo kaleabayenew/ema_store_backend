@@ -171,20 +171,23 @@ async function deleteFlashDeal(dealId) {
 
 async function getFlashDealProducts(dealId) {
   const { rows } = await pool.query(
-    `SELECT 
-       p.id,
-       p.name_en,
-       p.price_cents,
-       p.discount_cents as original_discount,
-       fd.discount_percent as flash_discount,
-       (p.price_cents * (1 - fd.discount_percent / 100))::integer as discounted_price,
-       p.image_url,
-       p.stock,
-       p.rating_avg
+    `SELECT
+       p.*,
+       pi.image_url AS primary_image_url,
+       c.name_en AS category_name,
+       p.discount_cents AS original_discount,
+       fd.discount_percent AS flash_discount,
+       (p.price_cents * (1 - fd.discount_percent / 100.0))::integer AS discounted_price,
+       p.rating_avg,
+       p.rating_count,
+       p.stock
      FROM flash_deal_products fdp
      JOIN products p ON p.id = fdp.product_id
      JOIN flash_deals fd ON fd.id = fdp.flash_deal_id
+     LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
+     LEFT JOIN categories c ON p.category = c.id
      WHERE fdp.flash_deal_id = $1
+       AND p.is_visible = true
      ORDER BY p.name_en`,
     [dealId],
   );
