@@ -1,38 +1,51 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
-async function getOrders(partnerId, { page = 1, limit = 20, status } = {}) {
+async function getOrders(partnerId, { page = 1, limit = 50, status } = {}) {
   const offset = (page - 1) * limit;
-  const params = [partnerId];
+  const countParams = [partnerId];
   let statusClause = '';
 
   if (status) {
-    params.push(status);
-    statusClause = `AND orders.status = $${params.length}`;
+    countParams.push(String(status).toUpperCase());
+    statusClause = `AND orders.status = $${countParams.length}`;
   }
 
-  const { rows: countRows } = await pool.query(
-    `SELECT COUNT(DISTINCT orders.id)::int AS total
-     FROM orders
-     JOIN order_items ON order_items.order_id = orders.id
-     JOIN products ON products.id = order_items.product_id
-     WHERE products.partner_id = $1 ${statusClause}`,
-    params,
-  );
+  const queryParams = [...countParams, limit, offset];
 
-  params.push(limit, offset);
-  const { rows } = await pool.query(
-    `SELECT DISTINCT orders.*
-     FROM orders
-     JOIN order_items ON order_items.order_id = orders.id
-     JOIN products ON products.id = order_items.product_id
-     WHERE products.partner_id = $1 ${statusClause}
-     ORDER BY orders.created_at DESC
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
-  );
+  const [countRes, rowsRes] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(DISTINCT orders.id)::int AS total
+       FROM orders
+       JOIN order_items ON order_items.order_id = orders.id
+       JOIN products ON products.id = order_items.product_id
+       WHERE products.partner_id = $1 ${statusClause}`,
+      countParams,
+    ),
+    pool.query(
+      `SELECT 
+         orders.id,
+         orders.total_amount,
+         orders.status,
+         orders.shipping_address,
+         orders.payment_method,
+         orders.created_at,
+         orders.updated_at,
+         COALESCE(u.full_name, u.phone, 'Customer') AS customer_name,
+         COALESCE(SUM(order_items.quantity), 1)::int AS item_count
+       FROM orders
+       JOIN order_items ON order_items.order_id = orders.id
+       JOIN products ON products.id = order_items.product_id
+       LEFT JOIN users u ON u.id = orders.user_id
+       WHERE products.partner_id = $1 ${statusClause}
+       GROUP BY orders.id, u.full_name, u.phone
+       ORDER BY orders.created_at DESC
+       LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
+      queryParams,
+    ),
+  ]);
 
-  return { orders: rows, total: countRows[0].total, page, limit };
+  return { orders: rowsRes.rows, total: countRes.rows[0]?.total ?? 0, page, limit };
 }
 
 async function getOrder(partnerId, orderId) {
