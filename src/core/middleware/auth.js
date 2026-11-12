@@ -2,6 +2,28 @@ const { verifyToken } = require('../utils/jwt');
 const { AppError } = require('../errors/app_error');
 const { pool } = require('../config/database');
 
+// Fast in-memory user cache (30s TTL) to prevent repeated DB roundtrips on rapid requests
+const userCache = new Map();
+const USER_CACHE_TTL_MS = 30000;
+
+function getCachedUser(userId) {
+  const entry = userCache.get(userId);
+  if (entry && (Date.now() - entry.timestamp < USER_CACHE_TTL_MS)) {
+    return entry.user;
+  }
+  return null;
+}
+
+function setCachedUser(userId, user) {
+  // Cap cache size to avoid unbounded memory usage
+  if (userCache.size > 5000) userCache.clear();
+  userCache.set(userId, { user, timestamp: Date.now() });
+}
+
+function invalidateUserCache(userId) {
+  userCache.delete(userId);
+}
+
 const STAFF_ROLES = [
   'ADMIN',
   'SUPER_ADMIN',
@@ -46,24 +68,29 @@ const requireAuth = async (req, _res, next) => {
       return next(new AppError('Invalid or malformed token.', 401, 'INVALID_TOKEN'));
     }
 
-    const { rows } = await pool.query(
-      `SELECT u.role, u.is_active, u.is_blocked, u.block_reason, au.admin_role
-         FROM users u
-         LEFT JOIN admin_user au ON au.user_id = u.id
-        WHERE u.id = $1`,
-      [decoded.id],
-    );
+    let u = getCachedUser(decoded.id);
+    if (!u) {
+      const { rows } = await pool.query(
+        `SELECT u.role, u.is_active, u.is_blocked, u.block_reason, au.admin_role
+           FROM users u
+           LEFT JOIN admin_user au ON au.user_id = u.id
+          WHERE u.id = $1`,
+        [decoded.id],
+      );
 
-    if (rows.length === 0) {
-      return next(new AppError('Account not found.', 401, 'USER_NOT_FOUND'));
+      if (rows.length === 0) {
+        return next(new AppError('Account not found.', 401, 'USER_NOT_FOUND'));
+      }
+      u = rows[0];
+      if (!u.is_blocked && u.is_active !== false) {
+        setCachedUser(decoded.id, u);
+      }
     }
-
-    const u = rows[0];
     if (u.is_blocked || u.is_active === false) {
       return next(
         new AppError(
           u.block_reason ||
-            'Your account has been suspended by the administration. Please contact support.',
+          'Your account has been suspended by the administration. Please contact support.',
           403,
           'ACCOUNT_BLOCKED',
         ),
@@ -165,4 +192,5 @@ module.exports = {
   requireStaff,
   requireSuperAdmin,
   requirePartner,
+  invalidateUserCache,
 };
