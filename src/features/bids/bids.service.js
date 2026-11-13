@@ -504,10 +504,10 @@ async function deleteBid(id) {
 
 // ── Place bid entry (Customer action) ────────────────────────────────────────
 //
-// Bidding is FREE: no wallet balance is checked, held, or refunded. Any
-// positive amount is accepted — bids may be below, equal to, or above the
-// current top bid. Entries are still processed one at a time under the
-// auction row lock so placed_at ordering stays consistent.
+// Every bid entry is charged IN FULL from the bidder's wallet — a user who
+// bids 14 then 2 loses 16 (500 → 484). Any positive amount is accepted:
+// bids may be below, equal to, or above the current top bid. The auction row
+// is locked so entries are serialized.
 
 async function placeBidEntry(bidId, userId, amountInput) {
   await ensureBidSchema();
@@ -543,6 +543,42 @@ async function placeBidEntry(bidId, userId, amountInput) {
       throw new AppError('Auction has ended', 410, 'BID_ENDED');
     }
 
+    // Lock the bidder's wallet row, then debit the full bid amount.
+    const { rows: lockedUsers } = await client.query(
+      `SELECT id, balance FROM users WHERE id = $1 FOR UPDATE`,
+      [userId],
+    );
+    const me = lockedUsers[0];
+    if (!me) throw new AppError('Account not found', 404, 'USER_NOT_FOUND');
+
+    const balance = parseFloat(me.balance) || 0;
+    if (balance < amount) {
+      throw new AppError(
+        `Insufficient wallet balance. This bid needs ETB ${amount.toFixed(2)} but your wallet has ETB ${balance.toFixed(2)}. Please top up your wallet.`,
+        400,
+        'INSUFFICIENT_BALANCE',
+      );
+    }
+
+    const { rows: debited } = await client.query(
+      `UPDATE users
+          SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2 AND balance >= $1
+        RETURNING balance`,
+      [amount, userId],
+    );
+    if (debited.length === 0) {
+      throw new AppError('Insufficient wallet balance', 400, 'INSUFFICIENT_BALANCE');
+    }
+
+    await _walletTx(client, userId, {
+      title: `Bid placed - ${bid.title}`,
+      description: 'Deducted from your wallet for your bid.',
+      amount: -amount,
+      type: 'BID_HOLD',
+      metadata: { bidId, amountETB: amount },
+    });
+
     const { rows: entry } = await client.query(
       `INSERT INTO bid_entries (bid_id, user_id, amount, placed_at)
        VALUES ($1, $2, $3, $4)
@@ -552,7 +588,11 @@ async function placeBidEntry(bidId, userId, amountInput) {
 
     await client.query('COMMIT');
 
-    return { ...entry[0], charged: 0, wallet_balance: null };
+    return {
+      ...entry[0],
+      charged: amount,
+      wallet_balance: parseFloat(debited[0].balance) || 0,
+    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
