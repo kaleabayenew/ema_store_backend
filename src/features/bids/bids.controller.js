@@ -51,23 +51,13 @@ async function create(req, res, next) {
   try {
     const title = req.body.title;
     const productId = req.body.productId || req.body.product_id;
-    const startPrice = req.body.startPrice != null
-      ? Number(req.body.startPrice)
-      : (req.body.startPriceCents != null
-        ? Number(req.body.startPriceCents) / 100
-        : (req.body.start_price_cents != null ? Number(req.body.start_price_cents) / 100 : null));
-    const minIncrement = req.body.minIncrement != null
-      ? Number(req.body.minIncrement)
-      : (req.body.minBidIncrementCents != null
-        ? Number(req.body.minBidIncrementCents) / 100
-        : (req.body.min_bid_increment_cents != null ? Number(req.body.min_bid_increment_cents) / 100 : 10));
     const startsAt = req.body.startsAt || req.body.starts_at;
     const endsAt = req.body.endsAt || req.body.ends_at;
 
-    if (!title || !productId || startPrice == null || !startsAt || !endsAt) {
+    if (!title || !productId || !startsAt || !endsAt) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
-    const bid = await createBid({ title, productId, startPrice, minIncrement, startsAt, endsAt });
+    const bid = await createBid({ title, productId, startsAt, endsAt });
     created(res, { bid, auction: bid });
   } catch (e) {
     next(e);
