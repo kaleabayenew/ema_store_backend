@@ -504,10 +504,11 @@ async function deleteBid(id) {
 // ── Place bid entry (Customer action) ────────────────────────────────────────
 //
 // Wallet rules:
-//  • The full bid amount is HELD (debited) from the bidder's wallet balance.
-//  • When somebody else outbids them, their held amount is refunded at once.
-//  • So at any time only the current highest bidder has money held, and when
-//    the auction ends the winner's amount is already reserved.
+//  • EVERY bid entry is charged in full from the bidder's wallet balance, so
+//    a user who bids 1, then 4, then 6 has 11 held (balance 100 → 89).
+//  • The held total per auction is the sum of that user's bid entries and is
+//    tracked in bid_holds; when somebody else outbids them, the whole held
+//    sum is refunded at once.
 //  • Everything runs in one transaction with the auction row locked, so two
 //    simultaneous bids can never both win and a balance can never go negative.
 
@@ -557,8 +558,9 @@ async function placeBidEntry(bidId, userId, amountInput) {
     const startPrice = parseFloat(bid.start_price);
     const minIncrement = parseFloat(bid.min_increment);
 
-    // The same user may bid as many times as they like. If they are already the
-    // leader, only the extra amount is taken from the wallet (see toCharge).
+    // The same user may bid as many times as they like. Every entry is
+    // charged in full and the per-auction hold grows by that amount, so the
+    // wallet always reflects the sum of all the user's bids (see toCharge).
 
     const minRequired = top ? round2(currentMax + minIncrement) : startPrice;
     if (amount < minRequired) {
@@ -575,13 +577,15 @@ async function placeBidEntry(bidId, userId, amountInput) {
     const me = lockedUsers.find((u) => String(u.id) === String(userId));
     if (!me) throw new AppError('Account not found', 404, 'USER_NOT_FOUND');
 
-    // Charge only what is not already held for this auction.
+    // Each bid entry is charged in full; the hold accumulates the sum of all
+    // of this user's entries for the auction.
     const { rows: myHold } = await client.query(
       `SELECT amount FROM bid_holds WHERE bid_id = $1 AND user_id = $2`,
       [bidId, userId],
     );
     const alreadyHeld = myHold[0] ? parseFloat(myHold[0].amount) : 0;
-    const toCharge = round2(amount - alreadyHeld);
+    const toCharge = round2(amount);
+    const newHold = round2(alreadyHeld + amount);
 
     const balance = parseFloat(me.balance) || 0;
     const insufficient = () =>
@@ -612,7 +616,7 @@ async function placeBidEntry(bidId, userId, amountInput) {
     await client.query(
       `INSERT INTO bid_holds (bid_id, user_id, amount) VALUES ($1, $2, $3)
        ON CONFLICT (bid_id, user_id) DO UPDATE SET amount = EXCLUDED.amount`,
-      [bidId, userId, amount],
+      [bidId, userId, newHold],
     );
 
     // The previous leader has just been outbid → give their money back.
