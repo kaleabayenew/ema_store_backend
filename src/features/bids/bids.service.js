@@ -5,6 +5,41 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
+// ── Bid rules ─────────────────────────────────────────────────────────────────
+//  • Every auction starts at 1.00 and goes up in steps of 0.01.
+//  • A bidder is a person; a bid is every single entry (one person bidding 4
+//    times = 1 bidder, 4 bids).
+//  • When the countdown ends the winner is the LOWEST UNIQUE bid: the smallest
+//    amount that only ONE bid placed. Amounts placed more than once never win.
+const MIN_BID = 1.0;
+const BID_STEP = 0.01;
+
+/**
+ * Work out the winner from a list of { user_id, amount } rows.
+ * Returns { winnerUserId, winnerAmount, uniqueCount } (nulls when no amount is unique).
+ */
+function resolveWinner(entries) {
+  const counts = new Map();
+  for (const e of entries) {
+    const cents = Math.round(parseFloat(e.amount) * 100);
+    counts.set(cents, (counts.get(cents) || 0) + 1);
+  }
+  let best = null;
+  let uniqueCount = 0;
+  for (const e of entries) {
+    const cents = Math.round(parseFloat(e.amount) * 100);
+    if (counts.get(cents) !== 1) continue;
+    uniqueCount += 1;
+    if (best === null || cents < best.cents) best = { cents, userId: e.user_id };
+  }
+  return {
+    winnerUserId: best ? best.userId : null,
+    winnerAmount: best ? best.cents / 100 : null,
+    uniqueCount,
+    counts,
+  };
+}
+
 // ── Schema bootstrap ──────────────────────────────────────────────────────────
 // Created lazily (same pattern as credits.service) so no change to app.js is
 // needed. Safe to run many times.
@@ -71,12 +106,12 @@ function maskPhone(phone) {
  * @param isStaff   admin / staff panels get the full, unmasked data
  */
 function _format(r, viewerId = null, isStaff = false) {
-  const startPrice = parseFloat(r.start_price) || 0;
-  const minIncrement = parseFloat(r.min_increment) || 0;
+  // The rules are fixed: start at 1.00, step 0.01 (whatever an old row stores).
+  const startPrice = MIN_BID;
+  const minIncrement = BID_STEP;
   const highestBid = parseFloat(r.highest_bid) || 0;
   const startPriceCents = Math.round(startPrice * 100);
   const minIncrementCents = Math.round(minIncrement * 100);
-  const currentBidCents = highestBid > 0 ? Math.round(highestBid * 100) : startPriceCents;
   const productPriceCents = r.product_price_cents ? parseInt(r.product_price_cents, 10) : startPriceCents;
 
   // The clock is the single source of truth for the phase. The stored status
@@ -93,9 +128,18 @@ function _format(r, viewerId = null, isStaff = false) {
   const customerStatus =
     computedStatus === 'ENDED' ? 'closed' : computedStatus === 'ACTIVE' ? 'active' : 'cancelled';
 
-  // Customers only learn the top bidder's id when it is themselves.
-  const topId = r.current_bidder_id ?? null;
-  const currentBidderId = isStaff || (topId && viewerId && String(topId) === String(viewerId)) ? topId : null;
+  // Winner = lowest unique bid. Staff always see who is leading right now;
+  // customers only learn the result once the auction has ended, and only
+  // whether it is themselves.
+  const winnerId = r.winner_user_id ?? null;
+  const winnerAmount = r.winner_amount != null ? parseFloat(r.winner_amount) : null;
+  const ended = computedStatus === 'ENDED';
+  const iAmWinner = !!winnerId && !!viewerId && String(winnerId) === String(viewerId);
+  const currentBidderId = isStaff || (ended && iAmWinner) ? winnerId : null;
+
+  // current_bid_cents is only a "result" once the auction is over.
+  const currentBidCents =
+    (ended || isStaff) && winnerAmount != null ? Math.round(winnerAmount * 100) : startPriceCents;
 
   const out = {
     id:                      r.id,
@@ -125,11 +169,15 @@ function _format(r, viewerId = null, isStaff = false) {
     original_price_cents:    productPriceCents,
     product_price_cents:     productPriceCents,
     current_bid_cents:       currentBidCents,
-    highest_bid:             highestBid,
-    highestBid:              highestBid,
+    highest_bid:             isStaff ? highestBid : 0,
+    highestBid:              isStaff ? highestBid : 0,
     total_bidders:           r.total_bidders ?? 0,
     totalBidders:            r.total_bidders ?? 0,
     bidder_count:            r.total_bidders ?? 0,
+    total_bids:              r.total_bids ?? 0,
+    bid_count:               r.total_bids ?? 0,
+    totalBids:               r.total_bids ?? 0,
+    bidCount:                r.total_bids ?? 0,
     current_bidder_id:       currentBidderId,
     created_at:              r.created_at,
     createdAt:               r.created_at,
@@ -139,6 +187,12 @@ function _format(r, viewerId = null, isStaff = false) {
   if (isStaff) {
     out.lowest_bid = parseFloat(r.lowest_bid) || 0;
     out.lowestBid = out.lowest_bid;
+    out.winner_user_id = winnerId;
+    out.winnerUserId = winnerId;
+    out.winner_amount = winnerAmount;
+    out.winnerAmount = winnerAmount;
+    out.unique_bids = r.unique_bids ?? 0;
+    out.uniqueBids = out.unique_bids;
     out.total_collected = parseFloat(r.total_collected) || 0;
     out.totalCollected = out.total_collected;
   }
@@ -155,6 +209,7 @@ const BID_SELECT = `
     p.description_en   AS description,
     pi.image_url       AS product_image,
     COUNT(DISTINCT be.user_id)::int  AS total_bidders,
+    COUNT(be.id)::int                AS total_bids,
     COALESCE(MIN(be.amount), 0)::numeric AS lowest_bid,
     COALESCE(MAX(be.amount), 0)::numeric AS highest_bid,
     COALESCE(SUM(be.amount), 0)::numeric AS total_collected,
@@ -162,9 +217,24 @@ const BID_SELECT = `
       SELECT be2.user_id
       FROM bid_entries be2
       WHERE be2.bid_id = b.id
-      ORDER BY be2.amount DESC, be2.placed_at ASC
+        AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+      ORDER BY be2.amount ASC, be2.placed_at ASC
       LIMIT 1
-    ) AS current_bidder_id
+    ) AS winner_user_id,
+    (
+      SELECT be2.amount
+      FROM bid_entries be2
+      WHERE be2.bid_id = b.id
+        AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+      ORDER BY be2.amount ASC, be2.placed_at ASC
+      LIMIT 1
+    ) AS winner_amount,
+    (
+      SELECT COUNT(*)::int
+      FROM bid_entries be2
+      WHERE be2.bid_id = b.id
+        AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+    ) AS unique_bids
   FROM bids b
   LEFT JOIN products p  ON p.id = b.product_id
   LEFT JOIN product_images pi ON pi.product_id = b.product_id AND pi.is_primary = true
@@ -286,11 +356,47 @@ async function getBidById(id, userId = null, { isStaff = false } = {}) {
        LEFT JOIN users u        ON u.id = be.user_id
        LEFT JOIN customer_user cu ON cu.user_id = be.user_id
        WHERE be.bid_id = $1
-       ORDER BY be.amount DESC, be.placed_at ASC`,
+       ORDER BY be.amount ASC, be.placed_at ASC`,
       [id],
     );
 
-    const highestAmount = entries.length > 0 ? parseFloat(entries[0].amount) : 0;
+    // Lowest unique bid wins: amounts placed more than once can never win.
+    const { winnerUserId, winnerAmount, counts } = resolveWinner(entries);
+    const sameAmount = (e) => counts.get(Math.round(parseFloat(e.amount) * 100)) || 1;
+    const isWinnerEntry = (e) =>
+      winnerAmount != null && Math.round(parseFloat(e.amount) * 100) === Math.round(winnerAmount * 100) && sameAmount(e) === 1;
+
+    // One row per bidder (person) with how many bids they placed.
+    const perBidder = new Map();
+    for (const e of entries) {
+      const key = String(e.user_id);
+      const row = perBidder.get(key) || {
+        user_id: e.user_id,
+        userId: e.user_id,
+        name: e.bidder_name ?? 'Unknown',
+        phone: e.bidder_phone,
+        bids: 0,
+        bidsCount: 0,
+      };
+      row.bids += 1;
+      row.bidsCount = row.bids;
+      perBidder.set(key, row);
+    }
+    bid.bidders = Array.from(perBidder.values());
+
+    const winnerEntry = entries.find(isWinnerEntry);
+    bid.winner = winnerEntry
+      ? {
+          user_id: winnerEntry.user_id,
+          name: winnerEntry.bidder_name ?? 'Unknown',
+          phone: winnerEntry.bidder_phone,
+          amount: winnerAmount,
+          amountCents: Math.round(winnerAmount * 100),
+          final: bid.status === 'ENDED',
+        }
+      : null;
+    bid.winner_user_id = winnerUserId;
+    bid.winnerUserId = winnerUserId;
 
     bid.entries = entries.map((e) => ({
       id:     e.id,
@@ -305,8 +411,12 @@ async function getBidById(id, userId = null, { isStaff = false } = {}) {
       bid_amount_cents: Math.round(parseFloat(e.amount) * 100),
       at:     e.placed_at,
       bid_time: e.placed_at,
-      is_highest: parseFloat(e.amount) === highestAmount,
-      isHighest: parseFloat(e.amount) === highestAmount,
+      duplicate_count: sameAmount(e),
+      duplicateCount: sameAmount(e),
+      is_unique: sameAmount(e) === 1,
+      isUnique: sameAmount(e) === 1,
+      is_winner: isWinnerEntry(e),
+      isWinner: isWinnerEntry(e),
     }));
   } else {
     // ── Customers: one row per bid entry (a user who bids twice shows twice),
@@ -319,6 +429,8 @@ async function getBidById(id, userId = null, { isStaff = false } = {}) {
        ORDER BY be.placed_at DESC`,
       [id],
     );
+
+    const winnerOf = resolveWinner(entries);
 
     bid.entries = entries.map((e) => {
       const mine = !!userId && !!e.user_id && String(e.user_id) === String(userId);
@@ -337,6 +449,13 @@ async function getBidById(id, userId = null, { isStaff = false } = {}) {
       };
       // A customer may see their own amount, never anybody else's.
       if (mine) {
+        if (bid.status === 'ENDED') {
+          const win = winnerOf && winnerOf.winnerAmount != null &&
+            Math.round(parseFloat(e.amount) * 100) === Math.round(winnerOf.winnerAmount * 100) &&
+            (winnerOf.counts.get(Math.round(parseFloat(e.amount) * 100)) || 1) === 1;
+          row.is_winner = !!win;
+          row.isWinner = !!win;
+        }
         const cents = Math.round(parseFloat(e.amount) * 100);
         row.amount = parseFloat(e.amount);
         row.amountCents = cents;
@@ -376,7 +495,7 @@ function _parseDate(value, label) {
   return d;
 }
 
-async function createBid({ title, productId, startPrice, minIncrement, startsAt, endsAt }) {
+async function createBid({ title, productId, startsAt, endsAt }) {
   await ensureBidSchema();
   // Passing JS Dates (not strings) keeps the TIMESTAMP columns consistent with
   // how node-pg reads them back, whatever timezone the server runs in.
@@ -388,14 +507,14 @@ async function createBid({ title, productId, startPrice, minIncrement, startsAt,
     `INSERT INTO bids (title, product_id, start_price, min_increment, starts_at, ends_at, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [title, productId, startPrice, minIncrement, start, end, _statusFor(start, end)],
+    [title, productId, MIN_BID, BID_STEP, start, end, _statusFor(start, end)],
   );
   return getBidById(rows[0].id, null, { isStaff: true });
 }
 
 // ── Update bid (Admin) ────────────────────────────────────────────────────────
 
-async function updateBid(id, { title, productId, startPrice, minIncrement, startsAt, endsAt } = {}) {
+async function updateBid(id, { title, productId, startsAt, endsAt } = {}) {
   await ensureBidSchema();
   if (!UUID_RE.test(String(id))) throw new AppError('Bid not found', 404, 'NOT_FOUND');
 
@@ -412,14 +531,14 @@ async function updateBid(id, { title, productId, startPrice, minIncrement, start
     `UPDATE bids
      SET title = COALESCE($1, title),
          product_id = COALESCE($2, product_id),
-         start_price = COALESCE($3, start_price),
-         min_increment = COALESCE($4, min_increment),
+         start_price = $3,
+         min_increment = $4,
          starts_at = $5,
          ends_at = $6,
          status = $7,
          updated_at = NOW()
      WHERE id = $8`,
-    [title ?? null, productId ?? null, startPrice ?? null, minIncrement ?? null, start, end, status, id],
+    [title ?? null, productId ?? null, MIN_BID, BID_STEP, start, end, status, id],
   );
   return getBidById(id, null, { isStaff: true });
 }
@@ -505,18 +624,27 @@ async function deleteBid(id) {
 // ── Place bid entry (Customer action) ────────────────────────────────────────
 //
 // Every bid entry is charged IN FULL from the bidder's wallet — a user who
-// bids 14 then 2 loses 16 (500 → 484). Any positive amount is accepted:
-// bids may be below, equal to, or above the current top bid. The auction row
-// is locked so entries are serialized.
+// bids 14 then 2 loses 16 (500 → 484). Rules: the amount must be at least
+// 1.00 and a multiple of 0.01. Equal amounts are allowed (they just cancel each
+// other out when the winner is picked: lowest UNIQUE bid wins). The auction
+// row is locked so entries are serialized.
 
 async function placeBidEntry(bidId, userId, amountInput) {
   await ensureBidSchema();
   if (!UUID_RE.test(String(bidId))) throw new AppError('Auction not found', 404, 'NOT_FOUND');
 
   // The controller already converts cents → ETB, so the value is in Birr here.
-  const amount = round2(Number(amountInput));
+  const raw = Number(amountInput);
+  const amount = round2(raw);
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new AppError('Enter a valid bid amount', 400, 'INVALID_AMOUNT');
+  }
+  // Only whole cents (steps of 0.01): 1.005 is rejected instead of silently rounded.
+  if (Math.abs(raw * 100 - Math.round(raw * 100)) > 1e-6) {
+    throw new AppError('Bids go up in steps of 0.01', 400, 'INVALID_AMOUNT');
+  }
+  if (amount < MIN_BID) {
+    throw new AppError(`The lowest bid is ${MIN_BID.toFixed(2)}`, 400, 'BID_TOO_LOW');
   }
 
   const client = await pool.connect();
@@ -613,14 +741,30 @@ async function getMyBids(userId) {
        p.description_en   AS description,
        pi.image_url       AS product_image,
        COUNT(DISTINCT be.user_id)::int  AS total_bidders,
+       COUNT(be.id)::int                AS total_bids,
        COALESCE(MAX(be.amount), 0)::numeric AS highest_bid,
-       (
-         SELECT be2.user_id
-         FROM bid_entries be2
-         WHERE be2.bid_id = b.id
-         ORDER BY be2.amount DESC, be2.placed_at ASC
-         LIMIT 1
-       ) AS current_bidder_id
+     (
+        SELECT be2.user_id
+        FROM bid_entries be2
+        WHERE be2.bid_id = b.id
+          AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+        ORDER BY be2.amount ASC, be2.placed_at ASC
+        LIMIT 1
+      ) AS winner_user_id,
+      (
+        SELECT be2.amount
+        FROM bid_entries be2
+        WHERE be2.bid_id = b.id
+          AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+        ORDER BY be2.amount ASC, be2.placed_at ASC
+        LIMIT 1
+      ) AS winner_amount,
+      (
+        SELECT COUNT(*)::int
+        FROM bid_entries be2
+        WHERE be2.bid_id = b.id
+          AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+      ) AS unique_bids
      FROM bids b
      JOIN bid_entries my_be ON my_be.bid_id = b.id AND my_be.user_id = $1
      LEFT JOIN products p  ON p.id = b.product_id
@@ -658,4 +802,7 @@ module.exports = {
   getMyBids,
   getWonAuctions,
   maskPhone,
+  resolveWinner,
+  MIN_BID,
+  BID_STEP,
 };
