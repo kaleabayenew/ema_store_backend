@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const ctrl = require('./flash-deals.controller');
-const { requireAuth } = require('../../core/middleware/auth');
+const { requireAuth, requireStaff } = require('../../core/middleware/auth');
 
 const router = Router();
 
@@ -8,11 +8,11 @@ const router = Router();
 router.get('/active', ctrl.getActiveFlashDeals);
 router.get('/:id/products', ctrl.getFlashDealProducts);
 
-// ── Admin endpoints (require auth) ───────────────────────────────────────
-router.get('/', requireAuth, ctrl.getAllFlashDeals);
-router.get('/:id', requireAuth, ctrl.getFlashDealById);
-router.post('/', requireAuth, ctrl.createFlashDeal);
-router.patch('/:id', requireAuth, ctrl.updateFlashDeal);
-router.delete('/:id', requireAuth, ctrl.deleteFlashDeal);
+// ── Admin endpoints (staff only) ─────────────────────────────────────────
+router.get('/', requireAuth, requireStaff, ctrl.getAllFlashDeals);
+router.get('/:id', requireAuth, requireStaff, ctrl.getFlashDealById);
+router.post('/', requireAuth, requireStaff, ctrl.createFlashDeal);
+router.patch('/:id', requireAuth, requireStaff, ctrl.updateFlashDeal);
+router.delete('/:id', requireAuth, requireStaff, ctrl.deleteFlashDeal);
 
 module.exports = router;

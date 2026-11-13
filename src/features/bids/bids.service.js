@@ -1,9 +1,75 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+// ── Schema bootstrap ──────────────────────────────────────────────────────────
+// Created lazily (same pattern as credits.service) so no change to app.js is
+// needed. Safe to run many times.
+//  • bid_entries.placed_at : older deployments created the column as bid_time.
+//  • bid_holds             : money currently held from a bidder's wallet for an
+//                            auction (only ever the current highest bidder).
+let _schemaReady = null;
+
+function ensureBidSchema() {
+  if (!_schemaReady) {
+    _schemaReady = (async () => {
+      await pool.query(
+        `ALTER TABLE bid_entries ADD COLUMN IF NOT EXISTS placed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+      );
+      const { rows } = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'bid_entries' AND column_name = 'bid_time'`,
+      );
+      if (rows.length > 0) {
+        await pool.query(
+          `UPDATE bid_entries SET placed_at = bid_time
+            WHERE bid_time IS NOT NULL AND placed_at IS DISTINCT FROM bid_time`,
+        );
+      }
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bid_holds (
+          bid_id     UUID NOT NULL REFERENCES bids(id) ON DELETE CASCADE,
+          user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          amount     DECIMAL(12, 2) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (bid_id, user_id)
+        )
+      `);
+    })().catch((err) => {
+      _schemaReady = null; // retry on the next request
+      throw err;
+    });
+  }
+  return _schemaReady;
+}
+
+// ── Privacy helpers ───────────────────────────────────────────────────────────
+
+/**
+ * +251931234562 / 0931234562 / 931234562  →  +25193****2
+ * Keeps the country code + operator digits and the last digit only.
+ */
+function maskPhone(phone) {
+  let n = String(phone ?? '').replace(/\D/g, '');
+  if (n.length < 7) return '****';
+  if (!n.startsWith('251')) {
+    if (n.startsWith('0') && n.length === 10) n = `251${n.slice(1)}`;
+    else if (n.length === 9) n = `251${n}`;
+  }
+  return `+${n.slice(0, 5)}****${n.slice(-1)}`;
+}
+
 // ── Format Helper ─────────────────────────────────────────────────────────────
 
-function _format(r) {
+/**
+ * @param r         raw row
+ * @param viewerId  id of the user asking (null for anonymous)
+ * @param isStaff   admin / staff panels get the full, unmasked data
+ */
+function _format(r, viewerId = null, isStaff = false) {
   const startPrice = parseFloat(r.start_price) || 0;
   const minIncrement = parseFloat(r.min_increment) || 0;
   const highestBid = parseFloat(r.highest_bid) || 0;
@@ -12,16 +78,25 @@ function _format(r) {
   const currentBidCents = highestBid > 0 ? Math.round(highestBid * 100) : startPriceCents;
   const productPriceCents = r.product_price_cents ? parseInt(r.product_price_cents, 10) : startPriceCents;
 
-  const now = new Date();
-  const endsAtDate = new Date(r.ends_at);
-  const startsAtDate = new Date(r.starts_at);
-  let computedStatus = r.status || 'ACTIVE';
-  if (endsAtDate <= now) computedStatus = 'ENDED';
-  else if (startsAtDate > now) computedStatus = 'DRAFT';
+  // The clock is the single source of truth for the phase. The stored status
+  // column is only honoured for an explicit CANCELLED (a scheduled auction
+  // stays 'DRAFT' in the table forever, so it can't be trusted).
+  const nowMs = Date.now();
+  const endsMs = new Date(r.ends_at).getTime();
+  const startsMs = new Date(r.starts_at).getTime();
+  let computedStatus = String(r.status || '').toUpperCase();
+  if (computedStatus !== 'CANCELLED') {
+    computedStatus = endsMs <= nowMs ? 'ENDED' : startsMs > nowMs ? 'DRAFT' : 'ACTIVE';
+  }
 
-  const customerStatus = computedStatus === 'ENDED' ? 'closed' : computedStatus === 'DRAFT' ? 'cancelled' : 'active';
+  const customerStatus =
+    computedStatus === 'ENDED' ? 'closed' : computedStatus === 'ACTIVE' ? 'active' : 'cancelled';
 
-  return {
+  // Customers only learn the top bidder's id when it is themselves.
+  const topId = r.current_bidder_id ?? null;
+  const currentBidderId = isStaff || (topId && viewerId && String(topId) === String(viewerId)) ? topId : null;
+
+  const out = {
     id:                      r.id,
     title:                   r.title,
     productId:               r.product_id,
@@ -41,6 +116,9 @@ function _format(r) {
     starts_at:               r.starts_at,
     endsAt:                  r.ends_at,
     ends_at:                 r.ends_at,
+    // Server clock so the app's countdown never depends on the phone's clock.
+    server_time:             new Date(nowMs).toISOString(),
+    serverTime:              new Date(nowMs).toISOString(),
     status:                  computedStatus,
     customer_status:         customerStatus,
     original_price_cents:    productPriceCents,
@@ -48,182 +126,238 @@ function _format(r) {
     current_bid_cents:       currentBidCents,
     highest_bid:             highestBid,
     highestBid:              highestBid,
-    lowest_bid:              parseFloat(r.lowest_bid) || 0,
-    lowestBid:               parseFloat(r.lowest_bid) || 0,
     total_bidders:           r.total_bidders ?? 0,
     totalBidders:            r.total_bidders ?? 0,
     bidder_count:            r.total_bidders ?? 0,
-    total_collected:         parseFloat(r.total_collected) || 0,
-    totalCollected:          parseFloat(r.total_collected) || 0,
-    current_bidder_id:       r.current_bidder_id ?? null,
+    current_bidder_id:       currentBidderId,
     created_at:              r.created_at,
     createdAt:               r.created_at,
   };
+
+  // Aggregates over everybody's amounts are admin-only.
+  if (isStaff) {
+    out.lowest_bid = parseFloat(r.lowest_bid) || 0;
+    out.lowestBid = out.lowest_bid;
+    out.total_collected = parseFloat(r.total_collected) || 0;
+    out.totalCollected = out.total_collected;
+  }
+  return out;
+}
+
+// ── Shared SELECT for list / detail ──────────────────────────────────────────
+
+const BID_SELECT = `
+  SELECT
+    b.*,
+    p.name_en          AS product_name,
+    p.price_cents      AS product_price_cents,
+    p.description_en   AS description,
+    pi.image_url       AS product_image,
+    COUNT(DISTINCT be.user_id)::int  AS total_bidders,
+    COALESCE(MIN(be.amount), 0)::numeric AS lowest_bid,
+    COALESCE(MAX(be.amount), 0)::numeric AS highest_bid,
+    COALESCE(SUM(be.amount), 0)::numeric AS total_collected,
+    (
+      SELECT be2.user_id
+      FROM bid_entries be2
+      WHERE be2.bid_id = b.id
+      ORDER BY be2.amount DESC, be2.placed_at ASC
+      LIMIT 1
+    ) AS current_bidder_id
+  FROM bids b
+  LEFT JOIN products p  ON p.id = b.product_id
+  LEFT JOIN product_images pi ON pi.product_id = b.product_id AND pi.is_primary = true
+  LEFT JOIN bid_entries be ON be.bid_id = b.id
+`;
+
+const BID_GROUP = `GROUP BY b.id, p.name_en, p.price_cents, p.description_en, pi.image_url`;
+
+async function _attachMyBids(list, userId) {
+  if (!userId || list.length === 0) return;
+  const bidIds = list.map((b) => b.id);
+  const { rows: myEntries } = await pool.query(
+    `SELECT bid_id, MAX(amount)::numeric AS max_amount
+       FROM bid_entries
+      WHERE user_id = $1 AND bid_id = ANY($2::uuid[])
+      GROUP BY bid_id`,
+    [userId, bidIds],
+  );
+  const myMap = new Map();
+  for (const me of myEntries) {
+    myMap.set(me.bid_id, Math.round(parseFloat(me.max_amount) * 100));
+  }
+  for (const b of list) {
+    b.my_bid_cents = myMap.get(b.id) ?? null;
+    b.myBidCents = b.my_bid_cents;
+  }
 }
 
 // ── List all bids ─────────────────────────────────────────────────────────────
 
-async function listBids({ status, page = 1, limit = 20, userId } = {}) {
-  const offset = (page - 1) * limit;
-  let where = 'WHERE 1=1';
+async function listBids({ status, page = 1, limit = 20, userId, isStaff = false } = {}) {
+  await ensureBidSchema();
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (safePage - 1) * safeLimit;
+
   const params = [];
-  let idx = 1;
+  const push = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const where = ['1=1'];
 
   if (status) {
-    if (status.toUpperCase() === 'ACTIVE') {
-      where += ` AND b.status = 'ACTIVE' AND b.ends_at > NOW() AND b.starts_at <= NOW()`;
-    } else if (status.toUpperCase() === 'ENDED' || status === 'closed') {
-      where += ` AND (b.status = 'ENDED' OR b.ends_at <= NOW())`;
+    const s = String(status).toUpperCase();
+    const now = push(new Date());
+    if (s === 'ACTIVE') {
+      where.push(`b.status <> 'CANCELLED' AND b.starts_at <= ${now} AND b.ends_at > ${now}`);
+    } else if (s === 'ENDED' || s === 'CLOSED') {
+      where.push(`b.status <> 'CANCELLED' AND b.ends_at <= ${now}`);
+    } else if (s === 'DRAFT' || s === 'UPCOMING') {
+      where.push(`b.status <> 'CANCELLED' AND b.starts_at > ${now}`);
     } else {
-      where += ` AND b.status = $${idx}`;
-      params.push(status);
-      idx++;
+      params.pop();
+      where.push(`b.status = ${push(s)}`);
     }
   }
 
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
   const countRes = await pool.query(
-    `SELECT COUNT(*)::int AS total FROM bids b ${where}`,
+    `SELECT COUNT(*)::int AS total FROM bids b ${whereSql}`,
     params,
   );
   const total = countRes.rows[0]?.total ?? 0;
 
+  const limitIdx = push(safeLimit);
+  const offsetIdx = push(offset);
   const { rows } = await pool.query(
-    `SELECT
-       b.*,
-       p.name_en          AS product_name,
-       p.price_cents      AS product_price_cents,
-       p.description_en   AS description,
-       pi.image_url       AS product_image,
-       COUNT(DISTINCT be.user_id)::int  AS total_bidders,
-       COALESCE(MIN(be.amount), 0)::numeric AS lowest_bid,
-       COALESCE(MAX(be.amount), 0)::numeric AS highest_bid,
-       COALESCE(SUM(be.amount), 0)::numeric AS total_collected,
-       (
-         SELECT be2.user_id
-         FROM bid_entries be2
-         WHERE be2.bid_id = b.id
-         ORDER BY be2.amount DESC, be2.placed_at ASC
-         LIMIT 1
-       ) AS current_bidder_id
-     FROM bids b
-     LEFT JOIN products p  ON p.id = b.product_id
-     LEFT JOIN product_images pi ON pi.product_id = b.product_id AND pi.is_primary = true
-     LEFT JOIN bid_entries be ON be.bid_id = b.id
-     ${where}
-     GROUP BY b.id, p.name_en, p.price_cents, p.description_en, pi.image_url
-     ORDER BY b.created_at DESC
-     LIMIT $${idx} OFFSET $${idx + 1}`,
-    [...params, limit, offset],
+    `${BID_SELECT}
+     ${whereSql}
+     ${BID_GROUP}
+     ORDER BY ${isStaff ? 'b.created_at DESC' : 'b.ends_at ASC, b.created_at DESC'}
+     LIMIT ${limitIdx} OFFSET ${offsetIdx}`,
+    params,
   );
 
-  const formattedBids = rows.map(_format);
-
-  // If userId is provided, attach my_bid_cents for each auction
-  if (userId && formattedBids.length > 0) {
-    const bidIds = formattedBids.map((b) => b.id);
-    const { rows: myEntries } = await pool.query(
-      `SELECT bid_id, MAX(amount)::numeric AS max_amount
-       FROM bid_entries
-       WHERE user_id = $1 AND bid_id = ANY($2::uuid[])
-       GROUP BY bid_id`,
-      [userId, bidIds],
-    );
-    const myMap = new Map();
-    for (const me of myEntries) {
-      myMap.set(me.bid_id, Math.round(parseFloat(me.max_amount) * 100));
-    }
-    for (const b of formattedBids) {
-      b.my_bid_cents = myMap.get(b.id) ?? null;
-      b.myBidCents = b.my_bid_cents;
-    }
-  }
+  const formattedBids = rows.map((r) => _format(r, userId, isStaff));
+  await _attachMyBids(formattedBids, userId);
 
   return {
     bids: formattedBids,
     auctions: formattedBids, // support both keys for customer & web
     total,
-    page,
-    limit,
-    totalPages: Math.max(1, Math.ceil(total / limit)),
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+    server_time: new Date().toISOString(),
   };
 }
 
-// ── Get single bid with all entries ──────────────────────────────────────────
+// ── Get single bid with its bid history ──────────────────────────────────────
 
-async function getBidById(id, userId = null) {
+async function getBidById(id, userId = null, { isStaff = false } = {}) {
+  await ensureBidSchema();
+  if (!UUID_RE.test(String(id))) throw new AppError('Bid not found', 404, 'NOT_FOUND');
+
   const { rows } = await pool.query(
-    `SELECT
-       b.*,
-       p.name_en          AS product_name,
-       p.price_cents      AS product_price_cents,
-       p.description_en   AS description,
-       pi.image_url       AS product_image,
-       COUNT(DISTINCT be.user_id)::int  AS total_bidders,
-       COALESCE(MIN(be.amount), 0)::numeric AS lowest_bid,
-       COALESCE(MAX(be.amount), 0)::numeric AS highest_bid,
-       COALESCE(SUM(be.amount), 0)::numeric AS total_collected,
-       (
-         SELECT be2.user_id
-         FROM bid_entries be2
-         WHERE be2.bid_id = b.id
-         ORDER BY be2.amount DESC, be2.placed_at ASC
-         LIMIT 1
-       ) AS current_bidder_id
-     FROM bids b
-     LEFT JOIN products p  ON p.id = b.product_id
-     LEFT JOIN product_images pi ON pi.product_id = b.product_id AND pi.is_primary = true
-     LEFT JOIN bid_entries be ON be.bid_id = b.id
+    `${BID_SELECT}
      WHERE b.id = $1
-     GROUP BY b.id, p.name_en, p.price_cents, p.description_en, pi.image_url`,
+     ${BID_GROUP}`,
     [id],
   );
   if (rows.length === 0) throw new AppError('Bid not found', 404, 'NOT_FOUND');
 
-  const bid = _format(rows[0]);
+  const bid = _format(rows[0], userId, isStaff);
 
-  // Fetch all entries sorted highest → lowest
-  const { rows: entries } = await pool.query(
-    `SELECT
-       be.id,
-       be.user_id,
-       be.amount,
-       be.placed_at,
-       COALESCE(cu.full_name, u.phone) AS bidder_name,
-       u.phone                         AS bidder_phone
-     FROM bid_entries be
-     LEFT JOIN users u        ON u.id = be.user_id
-     LEFT JOIN customer_user cu ON cu.user_id = be.user_id
-     WHERE be.bid_id = $1
-     ORDER BY be.amount DESC, be.placed_at ASC`,
-    [id],
-  );
+  if (isStaff) {
+    // ── Admin / staff: full detail, highest first ──────────────────────────
+    const { rows: entries } = await pool.query(
+      `SELECT
+         be.id,
+         be.user_id,
+         be.amount,
+         be.placed_at,
+         COALESCE(cu.full_name, u.phone) AS bidder_name,
+         u.phone                         AS bidder_phone
+       FROM bid_entries be
+       LEFT JOIN users u        ON u.id = be.user_id
+       LEFT JOIN customer_user cu ON cu.user_id = be.user_id
+       WHERE be.bid_id = $1
+       ORDER BY be.amount DESC, be.placed_at ASC`,
+      [id],
+    );
 
-  const highestAmount = entries.length > 0 ? parseFloat(entries[0].amount) : 0;
+    const highestAmount = entries.length > 0 ? parseFloat(entries[0].amount) : 0;
 
-  bid.entries = entries.map((e) => ({
-    id:     e.id,
-    user_id: e.user_id,
-    userId: e.user_id,
-    name:   e.bidder_name ?? 'Unknown',
-    bidderName: e.bidder_name ?? 'Unknown',
-    bidder_name: e.bidder_name ?? 'Unknown',
-    phone:  e.bidder_phone,
-    amount: parseFloat(e.amount),
-    amountCents: Math.round(parseFloat(e.amount) * 100),
-    bid_amount_cents: Math.round(parseFloat(e.amount) * 100),
-    at:     e.placed_at,
-    bid_time: e.placed_at,
-    is_highest: parseFloat(e.amount) === highestAmount,
-    isHighest: parseFloat(e.amount) === highestAmount,
-  }));
+    bid.entries = entries.map((e) => ({
+      id:     e.id,
+      user_id: e.user_id,
+      userId: e.user_id,
+      name:   e.bidder_name ?? 'Unknown',
+      bidderName: e.bidder_name ?? 'Unknown',
+      bidder_name: e.bidder_name ?? 'Unknown',
+      phone:  e.bidder_phone,
+      amount: parseFloat(e.amount),
+      amountCents: Math.round(parseFloat(e.amount) * 100),
+      bid_amount_cents: Math.round(parseFloat(e.amount) * 100),
+      at:     e.placed_at,
+      bid_time: e.placed_at,
+      is_highest: parseFloat(e.amount) === highestAmount,
+      isHighest: parseFloat(e.amount) === highestAmount,
+    }));
+  } else {
+    // ── Customers: one row per bidder, masked phone, no amounts of others ──
+    // No ranking is exposed either: rows are ordered by time, newest first,
+    // and nothing says who is highest.
+    const { rows: entries } = await pool.query(
+      `SELECT DISTINCT ON (be.user_id)
+         be.id, be.user_id, be.amount, be.placed_at, u.phone AS bidder_phone
+       FROM bid_entries be
+       LEFT JOIN users u ON u.id = be.user_id
+       WHERE be.bid_id = $1
+       ORDER BY be.user_id, be.placed_at DESC`,
+      [id],
+    );
+    entries.sort((a, b) => new Date(b.placed_at) - new Date(a.placed_at));
+
+    bid.entries = entries.map((e) => {
+      const mine = !!userId && !!e.user_id && String(e.user_id) === String(userId);
+      const masked = maskPhone(e.bidder_phone);
+      const row = {
+        id:          e.id,
+        masked_phone: masked,
+        name:        masked,
+        bidderName:  masked,
+        bidder_name: masked,
+        phone:       masked,
+        is_mine:     mine,
+        isMine:      mine,
+        at:          e.placed_at,
+        bid_time:    e.placed_at,
+      };
+      // A customer may see their own amount, never anybody else's.
+      if (mine) {
+        const cents = Math.round(parseFloat(e.amount) * 100);
+        row.amount = parseFloat(e.amount);
+        row.amountCents = cents;
+        row.bid_amount_cents = cents;
+      }
+      return row;
+    });
+  }
 
   // Alias entries as bids for customer app
   bid.bids = bid.entries;
 
   if (userId) {
-    const myEntry = entries.find((e) => e.user_id === userId);
-    if (myEntry) {
-      bid.my_bid_cents = Math.round(parseFloat(myEntry.amount) * 100);
+    const { rows: mine } = await pool.query(
+      `SELECT MAX(amount)::numeric AS max_amount FROM bid_entries WHERE bid_id = $1 AND user_id = $2`,
+      [id, userId],
+    );
+    if (mine[0]?.max_amount != null) {
+      bid.my_bid_cents = Math.round(parseFloat(mine[0].max_amount) * 100);
       bid.myBidCents = bid.my_bid_cents;
     }
   }
@@ -233,98 +367,292 @@ async function getBidById(id, userId = null) {
 
 // ── Create bid (Admin) ────────────────────────────────────────────────────────
 
+function _statusFor(start, end) {
+  const now = Date.now();
+  return start.getTime() <= now && end.getTime() > now ? 'ACTIVE' : start.getTime() > now ? 'DRAFT' : 'ENDED';
+}
+
+function _parseDate(value, label) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) throw new AppError(`${label} is not a valid date`, 400, 'INVALID_DATE');
+  return d;
+}
+
 async function createBid({ title, productId, startPrice, minIncrement, startsAt, endsAt }) {
-  const now = new Date();
-  const start = new Date(startsAt);
-  const end = new Date(endsAt);
-  const status = start <= now && end > now ? 'ACTIVE' : start > now ? 'DRAFT' : 'ENDED';
+  await ensureBidSchema();
+  // Passing JS Dates (not strings) keeps the TIMESTAMP columns consistent with
+  // how node-pg reads them back, whatever timezone the server runs in.
+  const start = _parseDate(startsAt, 'Start time');
+  const end = _parseDate(endsAt, 'End time');
+  if (end <= start) throw new AppError('End time must be after the start time', 400, 'INVALID_DATE');
 
   const { rows } = await pool.query(
     `INSERT INTO bids (title, product_id, start_price, min_increment, starts_at, ends_at, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [title, productId, startPrice, minIncrement, startsAt, endsAt, status],
+    [title, productId, startPrice, minIncrement, start, end, _statusFor(start, end)],
   );
-  return getBidById(rows[0].id);
+  return getBidById(rows[0].id, null, { isStaff: true });
 }
 
 // ── Update bid (Admin) ────────────────────────────────────────────────────────
 
-async function updateBid(id, { title, productId, startPrice, minIncrement, startsAt, endsAt }) {
-  const now = new Date();
-  const start = new Date(startsAt);
-  const end = new Date(endsAt);
-  const status = start <= now && end > now ? 'ACTIVE' : start > now ? 'DRAFT' : 'ENDED';
+async function updateBid(id, { title, productId, startPrice, minIncrement, startsAt, endsAt } = {}) {
+  await ensureBidSchema();
+  if (!UUID_RE.test(String(id))) throw new AppError('Bid not found', 404, 'NOT_FOUND');
 
-  const { rowCount } = await pool.query(
+  const { rows: cur } = await pool.query('SELECT starts_at, ends_at, status FROM bids WHERE id = $1', [id]);
+  if (cur.length === 0) throw new AppError('Bid not found', 404, 'NOT_FOUND');
+
+  // Merge with what is stored so a partial update can't flip the status.
+  const start = startsAt ? _parseDate(startsAt, 'Start time') : new Date(cur[0].starts_at);
+  const end = endsAt ? _parseDate(endsAt, 'End time') : new Date(cur[0].ends_at);
+  if (end <= start) throw new AppError('End time must be after the start time', 400, 'INVALID_DATE');
+  const status = String(cur[0].status).toUpperCase() === 'CANCELLED' ? 'CANCELLED' : _statusFor(start, end);
+
+  await pool.query(
     `UPDATE bids
      SET title = COALESCE($1, title),
          product_id = COALESCE($2, product_id),
          start_price = COALESCE($3, start_price),
          min_increment = COALESCE($4, min_increment),
-         starts_at = COALESCE($5, starts_at),
-         ends_at = COALESCE($6, ends_at),
+         starts_at = $5,
+         ends_at = $6,
          status = $7,
          updated_at = NOW()
      WHERE id = $8`,
-    [title, productId, startPrice, minIncrement, startsAt, endsAt, status, id],
+    [title ?? null, productId ?? null, startPrice ?? null, minIncrement ?? null, start, end, status, id],
   );
-  if (rowCount === 0) throw new AppError('Bid not found', 404, 'NOT_FOUND');
-  return getBidById(id);
+  return getBidById(id, null, { isStaff: true });
+}
+
+// ── Wallet helpers (always called inside a transaction) ──────────────────────
+
+async function _walletTx(client, userId, { title, description, amount, type, metadata }) {
+  await client.query(
+    `INSERT INTO wallet_transactions (user_id, title, description, amount, type, status, metadata)
+     VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6)`,
+    [userId, String(title).slice(0, 255), description ?? null, amount, type, JSON.stringify(metadata ?? {})],
+  );
+}
+
+/** Give a user's held money back to their wallet. Returns the refunded amount. */
+async function _releaseHold(client, bidId, userId, { title, description }) {
+  const { rows } = await client.query(
+    `DELETE FROM bid_holds WHERE bid_id = $1 AND user_id = $2 RETURNING amount`,
+    [bidId, userId],
+  );
+  if (rows.length === 0) return 0;
+  const held = parseFloat(rows[0].amount) || 0;
+  if (held <= 0) return 0;
+
+  await client.query(
+    `UPDATE users SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [held, userId],
+  );
+  await _walletTx(client, userId, {
+    title,
+    description,
+    amount: held,
+    type: 'REFUND',
+    metadata: { bidId, amountETB: held, reason: 'BID_RELEASE' },
+  });
+  return held;
 }
 
 // ── Delete bid (Admin) ────────────────────────────────────────────────────────
 
 async function deleteBid(id) {
-  const { rowCount } = await pool.query('DELETE FROM bids WHERE id = $1', [id]);
-  if (rowCount === 0) throw new AppError('Bid not found', 404, 'NOT_FOUND');
+  await ensureBidSchema();
+  if (!UUID_RE.test(String(id))) throw new AppError('Bid not found', 404, 'NOT_FOUND');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: bidRows } = await client.query(
+      'SELECT id, title FROM bids WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (bidRows.length === 0) throw new AppError('Bid not found', 404, 'NOT_FOUND');
+
+    // Anything still held for this auction goes back to the bidders first.
+    const { rows: holds } = await client.query(
+      'SELECT user_id FROM bid_holds WHERE bid_id = $1 ORDER BY user_id',
+      [id],
+    );
+    if (holds.length > 0) {
+      await client.query(
+        `SELECT id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+        [holds.map((h) => h.user_id)],
+      );
+      for (const h of holds) {
+        await _releaseHold(client, id, h.user_id, {
+          title: `Bid refunded - ${bidRows[0].title}`,
+          description: 'The auction was removed.',
+        });
+      }
+    }
+
+    await client.query('DELETE FROM bids WHERE id = $1', [id]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Place bid entry (Customer action) ────────────────────────────────────────
+//
+// Wallet rules:
+//  • The full bid amount is HELD (debited) from the bidder's wallet balance.
+//  • When somebody else outbids them, their held amount is refunded at once.
+//  • So at any time only the current highest bidder has money held, and when
+//    the auction ends the winner's amount is already reserved.
+//  • Everything runs in one transaction with the auction row locked, so two
+//    simultaneous bids can never both win and a balance can never go negative.
 
 async function placeBidEntry(bidId, userId, amountInput) {
-  const { rows: bidRows } = await pool.query(
-    `SELECT start_price, min_increment, status, ends_at FROM bids WHERE id = $1`,
-    [bidId],
-  );
-  if (bidRows.length === 0) throw new AppError('Auction not found', 404, 'NOT_FOUND');
-  const bid = bidRows[0];
+  await ensureBidSchema();
+  if (!UUID_RE.test(String(bidId))) throw new AppError('Auction not found', 404, 'NOT_FOUND');
 
-  if (bid.status !== 'ACTIVE') throw new AppError('Auction is not active', 400, 'BID_NOT_ACTIVE');
-  if (new Date(bid.ends_at) < new Date()) throw new AppError('Auction has ended', 410, 'BID_ENDED');
-
-  const { rows: maxRows } = await pool.query(
-    `SELECT COALESCE(MAX(amount), 0)::numeric AS current_max FROM bid_entries WHERE bid_id = $1`,
-    [bidId],
-  );
-  const currentMax = parseFloat(maxRows[0].current_max);
-  const startPrice = parseFloat(bid.start_price);
-  const minIncrement = parseFloat(bid.min_increment);
-
-  // Amount may arrive in ETB or in cents (e.g., if > 10000 or customer sent cents)
-  let amount = Number(amountInput);
-  // If amount is passed as cents (like bid_amount_cents), convert to Birr
-  if (amount > 1000 && amount % 100 === 0 && amount >= (startPrice * 100)) {
-    amount = amount / 100;
+  // The controller already converts cents → ETB, so the value is in Birr here.
+  const amount = round2(Number(amountInput));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new AppError('Enter a valid bid amount', 400, 'INVALID_AMOUNT');
   }
 
-  const minRequired = currentMax > 0 ? currentMax + minIncrement : startPrice;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (amount < minRequired) {
-    throw new AppError(`Minimum bid is ETB ${minRequired.toLocaleString()}`, 409, 'BID_TOO_LOW');
+    // Lock the auction: bids on the same auction are processed one at a time.
+    const { rows: bidRows } = await client.query(
+      `SELECT id, title, start_price, min_increment, status, starts_at, ends_at
+         FROM bids WHERE id = $1 FOR UPDATE`,
+      [bidId],
+    );
+    if (bidRows.length === 0) throw new AppError('Auction not found', 404, 'NOT_FOUND');
+    const bid = bidRows[0];
+
+    const nowMs = Date.now();
+    if (String(bid.status).toUpperCase() === 'CANCELLED') {
+      throw new AppError('Auction is not active', 400, 'BID_NOT_ACTIVE');
+    }
+    if (new Date(bid.starts_at).getTime() > nowMs) {
+      throw new AppError('This auction has not started yet', 400, 'BID_NOT_STARTED');
+    }
+    if (new Date(bid.ends_at).getTime() <= nowMs) {
+      throw new AppError('Auction has ended', 410, 'BID_ENDED');
+    }
+
+    const { rows: topRows } = await client.query(
+      `SELECT user_id, amount FROM bid_entries
+        WHERE bid_id = $1
+        ORDER BY amount DESC, placed_at ASC
+        LIMIT 1`,
+      [bidId],
+    );
+    const top = topRows[0] ?? null;
+    const currentMax = top ? parseFloat(top.amount) : 0;
+    const startPrice = parseFloat(bid.start_price);
+    const minIncrement = parseFloat(bid.min_increment);
+
+    if (top && top.user_id && String(top.user_id) === String(userId)) {
+      throw new AppError('You are already the highest bidder', 400, 'ALREADY_HIGHEST');
+    }
+
+    const minRequired = top ? round2(currentMax + minIncrement) : startPrice;
+    if (amount < minRequired) {
+      throw new AppError(`Minimum bid is ETB ${minRequired.toLocaleString()}`, 409, 'BID_TOO_LOW');
+    }
+
+    // Lock the bidder (and the previous leader) in a fixed order → no deadlocks.
+    const prevUserId = top && top.user_id && String(top.user_id) !== String(userId) ? top.user_id : null;
+    const lockIds = prevUserId ? [userId, prevUserId] : [userId];
+    const { rows: lockedUsers } = await client.query(
+      `SELECT id, balance FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+      [lockIds],
+    );
+    const me = lockedUsers.find((u) => String(u.id) === String(userId));
+    if (!me) throw new AppError('Account not found', 404, 'USER_NOT_FOUND');
+
+    // Charge only what is not already held for this auction.
+    const { rows: myHold } = await client.query(
+      `SELECT amount FROM bid_holds WHERE bid_id = $1 AND user_id = $2`,
+      [bidId, userId],
+    );
+    const alreadyHeld = myHold[0] ? parseFloat(myHold[0].amount) : 0;
+    const toCharge = round2(amount - alreadyHeld);
+
+    const balance = parseFloat(me.balance) || 0;
+    const insufficient = () =>
+      new AppError(
+        `Insufficient wallet balance. This bid needs ETB ${toCharge.toFixed(2)} but your wallet has ETB ${balance.toFixed(2)}. Please top up your wallet.`,
+        400,
+        'INSUFFICIENT_BALANCE',
+      );
+    if (balance < toCharge) throw insufficient();
+
+    const { rows: debited } = await client.query(
+      `UPDATE users
+          SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2 AND balance >= $1
+        RETURNING balance`,
+      [toCharge, userId],
+    );
+    if (debited.length === 0) throw insufficient();
+
+    await _walletTx(client, userId, {
+      title: `Bid placed - ${bid.title}`,
+      description: 'Held from your wallet. Refunded automatically if someone outbids you.',
+      amount: -toCharge,
+      type: 'BID_HOLD',
+      metadata: { bidId, amountETB: amount },
+    });
+
+    await client.query(
+      `INSERT INTO bid_holds (bid_id, user_id, amount) VALUES ($1, $2, $3)
+       ON CONFLICT (bid_id, user_id) DO UPDATE SET amount = EXCLUDED.amount`,
+      [bidId, userId, amount],
+    );
+
+    // The previous leader has just been outbid → give their money back.
+    if (prevUserId) {
+      await _releaseHold(client, bidId, prevUserId, {
+        title: `Bid refunded - ${bid.title}`,
+        description: 'You were outbid, so your held amount was returned.',
+      });
+    }
+
+    const { rows: entry } = await client.query(
+      `INSERT INTO bid_entries (bid_id, user_id, amount, placed_at)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, bid_id, user_id, amount, placed_at`,
+      [bidId, userId, amount, new Date(nowMs)],
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      ...entry[0],
+      charged: toCharge,
+      wallet_balance: parseFloat(debited[0].balance) || 0,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-
-  const { rows } = await pool.query(
-    `INSERT INTO bid_entries (bid_id, user_id, amount) VALUES ($1, $2, $3) RETURNING *`,
-    [bidId, userId, amount],
-  );
-
-  return rows[0];
 }
 
 // ── Customer: Get My Bids ────────────────────────────────────────────────────
 
 async function getMyBids(userId) {
+  await ensureBidSchema();
   const { rows } = await pool.query(
     `SELECT DISTINCT
        b.*,
@@ -351,27 +679,8 @@ async function getMyBids(userId) {
     [userId],
   );
 
-  const formatted = rows.map(_format);
-
-  if (formatted.length > 0) {
-    const bidIds = formatted.map((b) => b.id);
-    const { rows: myEntries } = await pool.query(
-      `SELECT bid_id, MAX(amount)::numeric AS max_amount
-       FROM bid_entries
-       WHERE user_id = $1 AND bid_id = ANY($2::uuid[])
-       GROUP BY bid_id`,
-      [userId, bidIds],
-    );
-    const myMap = new Map();
-    for (const me of myEntries) {
-      myMap.set(me.bid_id, Math.round(parseFloat(me.max_amount) * 100));
-    }
-    for (const b of formatted) {
-      b.my_bid_cents = myMap.get(b.id) ?? null;
-      b.myBidCents = b.my_bid_cents;
-    }
-  }
-
+  const formatted = rows.map((r) => _format(r, userId, false));
+  await _attachMyBids(formatted, userId);
   return formatted;
 }
 
@@ -379,9 +688,12 @@ async function getMyBids(userId) {
 
 async function getWonAuctions(userId) {
   const myBids = await getMyBids(userId);
-  return myBids.filter((b) => {
-    return (b.status === 'ENDED' || new Date(b.endsAt) <= new Date()) && b.current_bidder_id === userId;
-  });
+  return myBids.filter(
+    (b) =>
+      new Date(b.endsAt) <= new Date() &&
+      b.current_bidder_id != null &&
+      String(b.current_bidder_id) === String(userId),
+  );
 }
 
 module.exports = {
@@ -393,4 +705,5 @@ module.exports = {
   placeBidEntry,
   getMyBids,
   getWonAuctions,
+  maskPhone,
 };

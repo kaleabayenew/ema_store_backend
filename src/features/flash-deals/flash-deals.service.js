@@ -38,10 +38,11 @@ async function createFlashDeal({
 
     // Link products if provided
     if (productIds && productIds.length > 0) {
-      for (const productId of productIds) {
+      for (const productId of [...new Set(productIds)]) {
         await client.query(
           `INSERT INTO flash_deal_products (flash_deal_id, product_id)
-           VALUES ($1, $2)`,
+           VALUES ($1, $2)
+           ON CONFLICT (flash_deal_id, product_id) DO NOTHING`,
           [dealId, productId],
         );
       }
@@ -49,10 +50,11 @@ async function createFlashDeal({
 
     // Link categories if provided
     if (categoryIds && categoryIds.length > 0) {
-      for (const categoryId of categoryIds) {
+      for (const categoryId of [...new Set(categoryIds)]) {
         await client.query(
           `INSERT INTO flash_deal_categories (flash_deal_id, category_id)
-           VALUES ($1, $2::varchar)`,
+           VALUES ($1, $2::varchar)
+           ON CONFLICT (flash_deal_id, category_id) DO NOTHING`,
           [dealId, categoryId],
         );
       }
@@ -62,7 +64,7 @@ async function createFlashDeal({
 
     return getFlashDealById(dealId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
     throw err;
   } finally {
     client.release();
@@ -100,11 +102,11 @@ async function getFlashDealById(dealId) {
 
 // ── Get All Flash Deals ───────────────────────────────────────────────────
 
-async function getAllFlashDeals({ includeExpired = false, limit = 20, offset = 0 } = {}) {
+async function getAllFlashDeals({ includeExpired = true, limit = 100, offset = 0 } = {}) {
+  // Admin view: paused (is_active = false) deals must still be listed so they can be re-activated.
   const { rows } = await pool.query(
     `SELECT * FROM flash_deals
-     WHERE is_active = true
-     ${includeExpired ? '' : 'AND ends_at > NOW()'}
+     ${includeExpired ? '' : 'WHERE ends_at > NOW()'}
      ORDER BY created_at DESC
      LIMIT $1 OFFSET $2`,
     [limit, offset],
@@ -130,6 +132,7 @@ async function getActiveFlashDeals() {
 // ── Update Flash Deal ─────────────────────────────────────────────────────
 
 async function updateFlashDeal(dealId, updates) {
+  const n = (v) => (v === undefined ? null : v);
   const { title, description, discountPercent, startsAt, endsAt, imageUrl, isActive } = updates;
 
   const { rows } = await pool.query(
@@ -144,7 +147,7 @@ async function updateFlashDeal(dealId, updates) {
          updated_at = NOW()
      WHERE id = $8
      RETURNING *`,
-    [title, description, discountPercent, startsAt, endsAt, imageUrl, isActive, dealId],
+    [n(title), n(description), n(discountPercent), n(startsAt), n(endsAt), n(imageUrl), n(isActive), dealId],
   );
 
   if (rows.length === 0) {

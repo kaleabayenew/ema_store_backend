@@ -11,11 +11,26 @@ const {
 const { ok, created } = require('../../core/utils/response');
 const { AppError } = require('../../core/errors/app_error');
 
+// Staff / admin panels see the full bid data. Everybody else (customers,
+// anonymous visitors, partners, riders) gets masked phones and no amounts of
+// other bidders. The role comes from the verified token (see bids.router).
+const STAFF_ROLES = [
+  'ADMIN', 'SUPER_ADMIN', 'CUSTOMER_SUPPORT', 'MANAGER', 'MANAGEMENT',
+  'PARTNER_MANAGER', 'PRODUCT_MANAGER', 'FINANCE', 'MARKETING',
+];
+const isStaffReq = (req) => STAFF_ROLES.includes(String(req.user?.role || '').toUpperCase());
+
 async function getAll(req, res, next) {
   try {
     const { status, page = 1, limit = 20 } = req.query;
     const userId = req.user?.id;
-    const result = await listBids({ status, page: parseInt(page, 10), limit: parseInt(limit, 10), userId });
+    const result = await listBids({
+      status,
+      page: parseInt(page, 10),
+      limit: parseInt(limit, 10),
+      userId,
+      isStaff: isStaffReq(req),
+    });
     ok(res, result);
   } catch (e) {
     next(e);
@@ -25,7 +40,7 @@ async function getAll(req, res, next) {
 async function getOne(req, res, next) {
   try {
     const userId = req.user?.id;
-    const bid = await getBidById(req.params.id, userId);
+    const bid = await getBidById(req.params.id, userId, { isStaff: isStaffReq(req) });
     ok(res, { bid, auction: bid, data: bid });
   } catch (e) {
     next(e);
@@ -90,7 +105,12 @@ async function placeEntry(req, res, next) {
       return res.status(400).json({ success: false, message: 'Bid amount is required' });
     }
     const entry = await placeBidEntry(req.params.id, userId, amount);
-    ok(res, { entry, message: 'Bid placed successfully' });
+    ok(res, {
+      entry,
+      wallet_balance: entry.wallet_balance,
+      charged: entry.charged,
+      message: 'Bid placed successfully',
+    });
   } catch (e) {
     next(e);
   }
