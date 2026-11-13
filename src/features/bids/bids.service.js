@@ -10,7 +10,8 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 // needed. Safe to run many times.
 //  • bid_entries.placed_at : older deployments created the column as bid_time.
 //  • bid_holds             : money currently held from a bidder's wallet for an
-//                            auction (only ever the current highest bidder).
+//                            auction (the sum of that user's bid entries; only
+//                            the current highest bidder keeps a hold).
 let _schemaReady = null;
 
 function ensureBidSchema() {
@@ -503,14 +504,10 @@ async function deleteBid(id) {
 
 // ── Place bid entry (Customer action) ────────────────────────────────────────
 //
-// Wallet rules:
-//  • EVERY bid entry is charged in full from the bidder's wallet balance, so
-//    a user who bids 1, then 4, then 6 has 11 held (balance 100 → 89).
-//  • The held total per auction is the sum of that user's bid entries and is
-//    tracked in bid_holds; when somebody else outbids them, the whole held
-//    sum is refunded at once.
-//  • Everything runs in one transaction with the auction row locked, so two
-//    simultaneous bids can never both win and a balance can never go negative.
+// Bidding is FREE: no wallet balance is checked, held, or refunded. Any
+// positive amount is accepted — bids may be below, equal to, or above the
+// current top bid. Entries are still processed one at a time under the
+// auction row lock so placed_at ordering stays consistent.
 
 async function placeBidEntry(bidId, userId, amountInput) {
   await ensureBidSchema();
@@ -528,7 +525,7 @@ async function placeBidEntry(bidId, userId, amountInput) {
 
     // Lock the auction: bids on the same auction are processed one at a time.
     const { rows: bidRows } = await client.query(
-      `SELECT id, title, start_price, min_increment, status, starts_at, ends_at
+      `SELECT id, title, status, starts_at, ends_at
          FROM bids WHERE id = $1 FOR UPDATE`,
       [bidId],
     );
@@ -546,87 +543,6 @@ async function placeBidEntry(bidId, userId, amountInput) {
       throw new AppError('Auction has ended', 410, 'BID_ENDED');
     }
 
-    const { rows: topRows } = await client.query(
-      `SELECT user_id, amount FROM bid_entries
-        WHERE bid_id = $1
-        ORDER BY amount DESC, placed_at ASC
-        LIMIT 1`,
-      [bidId],
-    );
-    const top = topRows[0] ?? null;
-    const currentMax = top ? parseFloat(top.amount) : 0;
-    const startPrice = parseFloat(bid.start_price);
-    const minIncrement = parseFloat(bid.min_increment);
-
-    // The same user may bid as many times as they like. Every entry is
-    // charged in full and the per-auction hold grows by that amount, so the
-    // wallet always reflects the sum of all the user's bids (see toCharge).
-
-    const minRequired = top ? round2(currentMax + minIncrement) : startPrice;
-    if (amount < minRequired) {
-      throw new AppError(`Minimum bid is ETB ${minRequired.toLocaleString()}`, 409, 'BID_TOO_LOW');
-    }
-
-    // Lock the bidder (and the previous leader) in a fixed order → no deadlocks.
-    const prevUserId = top && top.user_id && String(top.user_id) !== String(userId) ? top.user_id : null;
-    const lockIds = prevUserId ? [userId, prevUserId] : [userId];
-    const { rows: lockedUsers } = await client.query(
-      `SELECT id, balance FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
-      [lockIds],
-    );
-    const me = lockedUsers.find((u) => String(u.id) === String(userId));
-    if (!me) throw new AppError('Account not found', 404, 'USER_NOT_FOUND');
-
-    // Each bid entry is charged in full; the hold accumulates the sum of all
-    // of this user's entries for the auction.
-    const { rows: myHold } = await client.query(
-      `SELECT amount FROM bid_holds WHERE bid_id = $1 AND user_id = $2`,
-      [bidId, userId],
-    );
-    const alreadyHeld = myHold[0] ? parseFloat(myHold[0].amount) : 0;
-    const toCharge = round2(amount);
-    const newHold = round2(alreadyHeld + amount);
-
-    const balance = parseFloat(me.balance) || 0;
-    const insufficient = () =>
-      new AppError(
-        `Insufficient wallet balance. This bid needs ETB ${toCharge.toFixed(2)} but your wallet has ETB ${balance.toFixed(2)}. Please top up your wallet.`,
-        400,
-        'INSUFFICIENT_BALANCE',
-      );
-    if (balance < toCharge) throw insufficient();
-
-    const { rows: debited } = await client.query(
-      `UPDATE users
-          SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2 AND balance >= $1
-        RETURNING balance`,
-      [toCharge, userId],
-    );
-    if (debited.length === 0) throw insufficient();
-
-    await _walletTx(client, userId, {
-      title: `Bid placed - ${bid.title}`,
-      description: 'Held from your wallet. Refunded automatically if someone outbids you.',
-      amount: -toCharge,
-      type: 'BID_HOLD',
-      metadata: { bidId, amountETB: amount },
-    });
-
-    await client.query(
-      `INSERT INTO bid_holds (bid_id, user_id, amount) VALUES ($1, $2, $3)
-       ON CONFLICT (bid_id, user_id) DO UPDATE SET amount = EXCLUDED.amount`,
-      [bidId, userId, newHold],
-    );
-
-    // The previous leader has just been outbid → give their money back.
-    if (prevUserId) {
-      await _releaseHold(client, bidId, prevUserId, {
-        title: `Bid refunded - ${bid.title}`,
-        description: 'You were outbid, so your held amount was returned.',
-      });
-    }
-
     const { rows: entry } = await client.query(
       `INSERT INTO bid_entries (bid_id, user_id, amount, placed_at)
        VALUES ($1, $2, $3, $4)
@@ -636,11 +552,7 @@ async function placeBidEntry(bidId, userId, amountInput) {
 
     await client.query('COMMIT');
 
-    return {
-      ...entry[0],
-      charged: toCharge,
-      wallet_balance: parseFloat(debited[0].balance) || 0,
-    };
+    return { ...entry[0], charged: 0, wallet_balance: null };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
