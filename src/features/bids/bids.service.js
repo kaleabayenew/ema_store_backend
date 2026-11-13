@@ -560,9 +560,8 @@ async function placeBidEntry(bidId, userId, amountInput) {
     const startPrice = parseFloat(bid.start_price);
     const minIncrement = parseFloat(bid.min_increment);
 
-    if (top && top.user_id && String(top.user_id) === String(userId)) {
-      throw new AppError('You are already the highest bidder', 400, 'ALREADY_HIGHEST');
-    }
+    // The same user may bid as many times as they like. If they are already the
+    // leader, only the extra amount is taken from the wallet (see toCharge).
 
     const minRequired = top ? round2(currentMax + minIncrement) : startPrice;
     if (amount < minRequired) {
