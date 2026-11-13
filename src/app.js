@@ -293,6 +293,25 @@ async function autoMigrate() {
       // Column might already exist
     }
 
+    // Make older flash_deals tables (product_id / discount_percentage / start_time schema)
+    // compatible with the current schema so creating a deal never fails on a missing column.
+    for (const stmt of [
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS title VARCHAR(255)`,
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS description TEXT`,
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS discount_percent INTEGER`,
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS image_url TEXT`,
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS created_by UUID`,
+      `ALTER TABLE flash_deals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+      `ALTER TABLE flash_deals ALTER COLUMN product_id DROP NOT NULL`,
+      `ALTER TABLE flash_deals ALTER COLUMN discount_percentage DROP NOT NULL`,
+      `ALTER TABLE flash_deals ALTER COLUMN start_time DROP NOT NULL`,
+      `ALTER TABLE flash_deals ALTER COLUMN end_time DROP NOT NULL`,
+      `UPDATE flash_deals SET discount_percent = ROUND(discount_percentage)::int WHERE discount_percent IS NULL AND discount_percentage IS NOT NULL`,
+      `UPDATE flash_deals SET title = 'Flash deal' WHERE title IS NULL`,
+    ]) {
+      try { await pool.query(stmt); } catch (e) { /* column/legacy field may not exist */ }
+    }
+
     // Create orders table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -1120,6 +1139,7 @@ app.set('trust proxy', trustProxy);
 app.use(
   helmet({
     contentSecurityPolicy: false, // JSON API — no HTML to protect
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // uploaded images are shown on the admin/web origins
     hsts: isProduction
       ? { maxAge: 15552000, includeSubDomains: true, preload: true }
       : false,

@@ -118,7 +118,27 @@ async function getChatImageUrl(messageId, expiresIn = 3600) {
   return getPresignedUrl(key, expiresIn);
 }
 
+/** True when Neon/S3 object storage credentials are present. */
+function isStorageConfigured() {
+  return Boolean(
+    process.env.NEON_OBJECT_STORAGE_ENDPOINT &&
+      process.env.NEON_OBJECT_STORAGE_ACCESS_KEY_ID &&
+      process.env.NEON_OBJECT_STORAGE_SECRET_ACCESS_KEY,
+  );
+}
+
+/**
+ * Fetch an object from storage (used to serve images through a permanent URL).
+ * @returns {Promise<{ body: import('stream').Readable, contentType?: string, contentLength?: number }>}
+ */
+async function getObject(key) {
+  const out = await s3Client.send(new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+  return { body: out.Body, contentType: out.ContentType, contentLength: out.ContentLength };
+}
+
 module.exports = {
+  isStorageConfigured,
+  getObject,
   uploadToStorage,
   getPresignedUrl,
   deleteFromStorage,
