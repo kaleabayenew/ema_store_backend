@@ -85,11 +85,12 @@ async function getFlashDealById(dealId) {
 
   const deal = rows[0];
 
-  // Get associated products
+  // Get associated products (image comes from product_images — products has no image_url column)
   const { rows: productRows } = await pool.query(
-    `SELECT p.id, p.name_en, p.price_cents, p.discount_cents, p.image_url
+    `SELECT p.id, p.name_en, p.price_cents, p.discount_cents, pi.image_url
      FROM flash_deal_products fdp
      JOIN products p ON p.id = fdp.product_id
+     LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
      WHERE fdp.flash_deal_id = $1`,
     [dealId],
   );
