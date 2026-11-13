@@ -308,19 +308,16 @@ async function getBidById(id, userId = null, { isStaff = false } = {}) {
       isHighest: parseFloat(e.amount) === highestAmount,
     }));
   } else {
-    // ── Customers: one row per bidder, masked phone, no amounts of others ──
-    // No ranking is exposed either: rows are ordered by time, newest first,
-    // and nothing says who is highest.
+    // ── Customers: one row per bid entry (a user who bids twice shows twice),
+    // masked phone, no amounts of others, newest first ──
     const { rows: entries } = await pool.query(
-      `SELECT DISTINCT ON (be.user_id)
-         be.id, be.user_id, be.amount, be.placed_at, u.phone AS bidder_phone
+      `SELECT be.id, be.user_id, be.amount, be.placed_at, u.phone AS bidder_phone
        FROM bid_entries be
        LEFT JOIN users u ON u.id = be.user_id
        WHERE be.bid_id = $1
-       ORDER BY be.user_id, be.placed_at DESC`,
+       ORDER BY be.placed_at DESC`,
       [id],
     );
-    entries.sort((a, b) => new Date(b.placed_at) - new Date(a.placed_at));
 
     bid.entries = entries.map((e) => {
       const mine = !!userId && !!e.user_id && String(e.user_id) === String(userId);
