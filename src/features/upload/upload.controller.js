@@ -1,66 +1,72 @@
 const uploadService = require('./upload.service');
+const { AppError } = require('../../core/errors/app_error');
 
-// Simple file upload handler (without multer for now)
-async function uploadFile(req, res) {
+// Folders that must never be served through the public file endpoint
+const PRIVATE_FOLDERS = new Set(['chat-images']);
+const KEY_PATTERN = /^[a-z0-9_-]+\/[A-Za-z0-9._-]+\.(jpg|jpeg|png|webp|gif|avif)$/;
+
+const getBaseUrl = (req) =>
+  (process.env.PUBLIC_API_URL || process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+
+// POST /api/v1/upload  (multipart: file, folder?)
+async function uploadFile(req, res, next) {
   try {
-    // Check if file exists in request
-    if (!req.file && !req.body.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No file provided',
-      });
+    if (!req.file) {
+      throw new AppError('No file provided. Send an image in the "file" field.', 400, 'NO_FILE');
     }
-
-    const file = req.file || req.body.file;
-    const folder = req.body.folder || 'general';
-
-    const result = await uploadService.uploadFile(file, folder);
+    const folder = req.body?.folder || 'general';
+    const result = await uploadService.uploadFile(req.file, folder, getBaseUrl(req));
 
     res.json({
       success: true,
       url: result.url,
       fileName: result.fileName,
       size: result.size,
+      storageKey: result.storageKey,
     });
   } catch (error) {
-    console.error('Upload controller error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to upload file',
-    });
+    console.error('Upload controller error:', error.message);
+    next(error instanceof AppError ? error : new AppError('Failed to upload file. Please try again.', 500, 'UPLOAD_FAILED'));
   }
 }
 
-// Generate presigned URL for existing file
-async function getPresignedUrl(req, res) {
+// GET /api/v1/upload/file?key=flash-deals/xxxx.jpg  (public, permanent image URL)
+async function serveFile(req, res, next) {
   try {
-    const { storageKey } = req.params;
-    const expiresIn = parseInt(req.query.expiresIn) || 3600;
-
-    if (!storageKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'Storage key is required',
-      });
+    const key = String(req.query.key || '');
+    const folder = key.split('/')[0];
+    if (!KEY_PATTERN.test(key) || key.includes('..') || PRIVATE_FOLDERS.has(folder)) {
+      throw new AppError('File not found.', 404, 'FILE_NOT_FOUND');
     }
 
-    const url = await uploadService.getPresignedUrl(storageKey, expiresIn);
+    const file = await uploadService.readFile(key);
+    if (!file) throw new AppError('File not found.', 404, 'FILE_NOT_FOUND');
 
-    res.json({
-      success: true,
-      url,
-      expiresIn,
-    });
+    res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+    if (file.contentLength) res.setHeader('Content-Length', file.contentLength);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    file.stream.on('error', (e) => { console.error('[Upload] stream error:', e.message); res.destroy(); });
+    file.stream.pipe(res);
   } catch (error) {
-    console.error('Presigned URL controller error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to generate presigned URL',
-    });
+    next(error);
   }
 }
 
-module.exports = {
-  uploadFile,
-  getPresignedUrl,
-};
+// GET /api/v1/upload/presigned/:storageKey  (staff only — see router)
+async function getPresignedUrl(req, res, next) {
+  try {
+    const storageKey = decodeURIComponent(req.params.storageKey || '');
+    const expiresIn = Math.min(parseInt(req.query.expiresIn, 10) || 3600, 86400);
+    if (!storageKey || storageKey.includes('..')) {
+      throw new AppError('Storage key is required', 400, 'INVALID_KEY');
+    }
+    const url = await uploadService.getPresignedUrl(storageKey, expiresIn);
+    res.json({ success: true, url, expiresIn });
+  } catch (error) {
+    next(error instanceof AppError ? error : new AppError('Failed to generate presigned URL', 500, 'PRESIGN_FAILED'));
+  }
+}
+
+module.exports = { uploadFile, serveFile, getPresignedUrl };

@@ -347,7 +347,7 @@ async function addReply(ticketId, { senderId, guestId, body, imageUrl, isStaff =
   const { rows } = await pool.query(
     `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, image_url, is_staff)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [ticketId, senderId || null, isStaff ? null : (senderId ? null : guestId || null), body, imageUrl, isStaff],
+    [ticketId, senderId || null, isStaff ? null : (senderId ? null : guestId || null), body?.trim() || '', imageUrl, isStaff],
   );
 
   await pool.query(
