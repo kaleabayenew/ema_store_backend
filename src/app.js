@@ -1381,14 +1381,14 @@ setInterval(() => {
 const { processDueAnnouncements } = require('./features/announcements/announcements.service');
 setInterval(() => {
   processDueAnnouncements().catch((err) =>
-    console.error('[announcements] scheduler failed:', err.code || err.name),
+    console.error('[announcements] scheduler failed:', err.message || err.code || err),
   );
 }, 60 * 1000).unref();
 // First sweep shortly after boot so announcements scheduled while the server
 // was down still go out.
 setTimeout(() => {
   processDueAnnouncements().catch((err) =>
-    console.error('[announcements] startup sweep failed:', err.code || err.name),
+    console.error('[announcements] startup sweep failed:', err.message || err.code || err),
   );
 }, 20 * 1000).unref();
 

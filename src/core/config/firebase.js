@@ -18,6 +18,23 @@ function initFirebase() {
     return true;
   }
 
+  // Preferred on hosted platforms (Render etc.): the whole service-account
+  // JSON pasted into an env var — the .json file is gitignored and never
+  // reaches the deploy.
+  const envJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (envJson && envJson.trim().startsWith('{')) {
+    try {
+      const serviceAccount = JSON.parse(envJson);
+      initializeApp({ credential: cert(serviceAccount) });
+      console.log(`[Firebase] Admin SDK initialized ✓ via env var (project: ${serviceAccount.project_id})`);
+      _initialized = true;
+      return true;
+    } catch (err) {
+      console.error('[Firebase] FIREBASE_SERVICE_ACCOUNT_JSON is invalid JSON:', err.message);
+      return false;
+    }
+  }
+
   // Resolve service account file path
   const envPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
   const defaultPath = path.resolve(__dirname, '../../../firebase-service-account.json');
