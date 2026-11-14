@@ -142,5 +142,18 @@
     "telegramUrl": "",
     "status": "PENDING",
     "createdAt": "2026-11-14T12:43:27.038Z"
+  },
+  "rel_1794660725840_q60bi": {
+    "releaseId": "rel_1794660725840_q60bi",
+    "app": "customer",
+    "version": "0.1.0",
+    "buildNumber": 1,
+    "minVersion": "0.1.0",
+    "forceUpdate": false,
+    "releaseNotes": "Multi-image support, Ethiopia live location, announcements feed",
+    "apkUrl": "",
+    "telegramUrl": "",
+    "status": "PENDING",
+    "createdAt": "2026-11-14T12:52:05.841Z"
   }
 }
