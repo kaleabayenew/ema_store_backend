@@ -118,6 +118,37 @@ async function sendPasswordReset(chatId, phone, newPassword) {
   }
 }
 
+/** Escape Telegram Markdown special chars in user/admin-supplied text. */
+const escapeMd = (s) =>
+  String(s).replace(/([_*`[\]])/g, '\\$1');
+
+/**
+ * Send an admin announcement broadcast to a linked Telegram chat.
+ * @param {string} chatId
+ * @param {string} title
+ * @param {string} body
+ * @returns {Promise<{ success: boolean, error?: string }>}
+ */
+async function sendAnnouncement(chatId, title, body) {
+  if (!isValidChatId(chatId)) {
+    return { success: false, error: 'INVALID_INPUT' };
+  }
+
+  if (!bot) {
+    console.error('[Telegram Bot] announcement send failed (BOT_NOT_CONFIGURED)');
+    return { success: false, error: 'BOT_NOT_CONFIGURED' };
+  }
+
+  try {
+    const message = `📢 *${escapeMd(title)}*\n\n${escapeMd(body)}`;
+    await sendWithTimeout(chatId, message, { parse_mode: 'Markdown' });
+    return { success: true };
+  } catch (error) {
+    logSendFailure(chatId, error);
+    return { success: false, error: 'DELIVERY_FAILED' };
+  }
+}
+
 /**
  * Verify the bot token is valid
  * @returns {Promise<boolean>}
@@ -142,5 +173,6 @@ async function verifyBot() {
 module.exports = {
   sendOtp,
   sendPasswordReset,
+  sendAnnouncement,
   verifyBot,
 };

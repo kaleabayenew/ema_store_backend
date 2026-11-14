@@ -1,4 +1,5 @@
-const admin = require('firebase-admin');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 const path  = require('path');
 const fs    = require('fs');
 
@@ -12,18 +13,7 @@ const fs    = require('fs');
 let _initialized = false;
 
 function initFirebase() {
-  // Check if admin is available (firebase-admin package)
-  try {
-    if (!admin || !admin.apps) {
-      console.warn('[Firebase] firebase-admin package not available. Push notifications will be DISABLED.');
-      return false;
-    }
-  } catch (e) {
-    console.warn('[Firebase] Firebase not configured. Push notifications will be DISABLED.');
-    return false;
-  }
-
-  if (_initialized || (admin.apps && admin.apps.length > 0)) {
+  if (_initialized || getApps().length > 0) {
     _initialized = true;
     return true;
   }
@@ -47,8 +37,8 @@ function initFirebase() {
 
   try {
     const serviceAccount = require(serviceAccountPath);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+    initializeApp({
+      credential: cert(serviceAccount),
     });
     console.log(`[Firebase] Admin SDK initialized ✓ (project: ${serviceAccount.project_id})`);
     _initialized = true;
@@ -61,7 +51,7 @@ function initFirebase() {
 
 /**
  * Send a push notification to a single FCM token.
- * Returns true on success, false if Firebase is not configured or send fails.
+ * Returns true on success, 'INVALID_TOKEN' for dead tokens, false otherwise.
  *
  * @param {string} token - FCM device token
  * @param {{ title: string, body: string }} notification
@@ -106,11 +96,11 @@ async function sendPush(token, notification, data = {}) {
   };
 
   try {
-    const response = await admin.messaging().send(message);
+    const response = await getMessaging().send(message);
     console.log(`[Firebase] Push sent ✓ messageId: ${response}`);
     return true;
   } catch (err) {
-    // Token is invalid/expired — clear it from DB so we don't keep trying
+    // Token is invalid/expired — caller can clear it from DB
     if (
       err.code === 'messaging/invalid-registration-token' ||
       err.code === 'messaging/registration-token-not-registered'
@@ -160,7 +150,7 @@ async function sendMulticastPush(tokens, notification, data = {}) {
   };
 
   try {
-    const response = await admin.messaging().sendEachForMulticast(message);
+    const response = await getMessaging().sendEachForMulticast(message);
     console.log(`[Firebase] Multicast: ${response.successCount} sent, ${response.failureCount} failed`);
     return {
       successCount: response.successCount,

@@ -167,6 +167,17 @@ const requireStaff = withAuth((req, _res, next) => {
   next();
 });
 
+/** requireRoles — any of the given roles (case-insensitive). */
+const requireRoles = (...roles) =>
+  withAuth((req, _res, next) => {
+    const role = roleOf(req);
+    const allowed = roles.map((r) => String(r).toUpperCase());
+    if (!allowed.includes(role)) {
+      return next(new AppError('You do not have permission to perform this action.', 403, 'FORBIDDEN'));
+    }
+    next();
+  });
+
 /** requireSuperAdmin — SUPER_ADMIN only. */
 const requireSuperAdmin = withAuth((req, _res, next) => {
   const role = roleOf(req);
@@ -190,6 +201,7 @@ module.exports = {
   optionalAuth,
   adminOnly,
   requireStaff,
+  requireRoles,
   requireSuperAdmin,
   requirePartner,
   invalidateUserCache,

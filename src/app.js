@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const cookieParser = require('cookie-parser');
+const payloadCrypto = require('./core/middleware/payload_crypto');
 
 const { allowedOrigins, isOriginAllowed, nodeEnv, trustProxy, isProduction } = require('./core/config');
 const { pool } = require('./core/config/database');
@@ -60,6 +62,10 @@ async function autoMigrate() {
       await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT`);
       await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance DECIMAL(12, 2) DEFAULT 0`);
       await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER DEFAULT 0`);
+      // Purge any plaintext credentials that were stored historically —
+      // passwords must only ever exist as bcrypt hashes.
+      await pool.query(`UPDATE users SET password_plain = NULL WHERE password_plain IS NOT NULL`);
+      await pool.query(`UPDATE users SET password = NULL WHERE password IS NOT NULL`);
     } catch (e) {
       // Column might already exist
     }
@@ -329,6 +335,12 @@ async function autoMigrate() {
     // Ensure orders table has all admin-needed columns
     try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100)`); } catch (e) { }
     try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_cents INTEGER`); } catch (e) { }
+    try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_method VARCHAR(255)`); } catch (e) { }
+    try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_id VARCHAR(255)`); } catch (e) { }
+    try {
+      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(128)`);
+      await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idem ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL`);
+    } catch (e) { }
     try {
       // Backfill total_amount from total_cents if needed
       await pool.query(`UPDATE orders SET total_amount = total_cents / 100.0 WHERE total_amount IS NULL AND total_cents IS NOT NULL`);
@@ -378,6 +390,13 @@ async function autoMigrate() {
       );
     `);
     console.log('[Migration] ✓ Wallet transactions table');
+
+    try {
+      await pool.query(`ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(128)`);
+      await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_transactions_idem ON wallet_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`);
+    } catch (e) {
+      console.log('[Migration] Wallet idempotency key may already exist');
+    }
 
     // Create indexes for wallet_transactions
     try {
@@ -792,6 +811,25 @@ async function autoMigrate() {
 
     try {
       await pool.query(`
+        CREATE TABLE IF NOT EXISTS feedback (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+          message    TEXT NOT NULL,
+          rating     INTEGER CHECK (rating >= 1 AND rating <= 5),
+          status     VARCHAR(20) DEFAULT 'NEW',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status)`);
+      console.log('[Migration] ✓ Feedback table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Feedback table already exists or error:', e.message);
+    }
+
+    try {
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS recently_viewed (
           id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1079,12 +1117,29 @@ async function autoMigrate() {
     }
   } catch (error) {
     console.error('[Migration] ❌ Auto-migration failed:', error.message);
-    // Don't exit - let the server start anyway
+    // Rethrow so the caller can retry — the server still starts regardless.
+    throw error;
   }
 }
 
-// Run auto-migration before starting the server
-autoMigrate();
+// Run auto-migration before starting the server.
+// Neon free-tier compute scales to zero — the first connection often times
+// out while it wakes up, so retry a few times before giving up.
+(async () => {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await autoMigrate();
+      return;
+    } catch (e) {
+      if (attempt === 4) {
+        console.error('[Migration] ❌ Auto-migration failed after retries:', e.message);
+        return;
+      }
+      console.warn(`[Migration] attempt ${attempt} failed (${e.message}) — retrying in ${attempt * 3}s...`);
+      await new Promise((r) => setTimeout(r, attempt * 3000));
+    }
+  }
+})();
 
 // Start the auto-close job for support tickets
 try {
@@ -1115,6 +1170,7 @@ const customersRouter = require('./features/customers/customers.router');
 const adminPartnersRouter = require('./features/admin/partners.router');
 const adminCreditsRouter = require('./features/admin/credits.router');
 const adminUsersRouter = require('./features/users/users.router');
+const adminAnnouncementsRouter = require('./features/announcements/announcements.router');
 const bidsRouter = require('./features/bids/bids.router');
 const supportRouter = require('./features/support/support.router');
 const bannersRouter = require('./features/banners/banners.router');
@@ -1125,9 +1181,11 @@ const paymentMethodsRouter = require('./features/payment-methods/payment-methods
 const auctionsRouter = require('./features/auctions/auctions.router');
 const wishlistRouter = require('./features/wishlist/wishlist.router');
 const reviewsRouter = require('./features/reviews/reviews.router');
+const feedbackRouter = require('./features/feedback/feedback.router');
 const recentlyViewedRouter = require('./features/recently-viewed/recently_viewed.router');
 const marketingRouter = require('./features/marketing/marketing.router');
 const aboutRouter = require('./features/about/about.router');
+const appUpdateRouter = require('./features/app-update/app-update.router');
 
 const app = express();
 
@@ -1160,7 +1218,8 @@ const corsOptions = {
     'x-guest-id', 'X-Guest-Id', 'x-device-id', 'X-Device-Id',
   ],
   exposedHeaders: ['X-Total-Count', 'Retry-After'],
-  credentials: false,
+  // Required so browsers send the HttpOnly session cookie cross-origin.
+  credentials: true,
   optionsSuccessStatus: 204,
   preflightContinue: false,
 };
@@ -1177,8 +1236,28 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(cookieParser());
+
+// ── Optional secret API prefix ────────────────────────────────────────────────
+// When API_PATH_PREFIX is set (e.g. "x7k2q"), the admin web app calls
+// /<prefix>/api/v1/... and this strips the prefix before routing. The plain
+// /api/v1 paths keep working for the mobile apps.
+const apiPathPrefix = (process.env.API_PATH_PREFIX || '').replace(/^\/+|\/+$/g, '');
+if (apiPathPrefix) {
+  const prefix = `/${apiPathPrefix}`;
+  app.use((req, _res, next) => {
+    if (req.path === prefix || req.path.startsWith(prefix + '/')) {
+      req.url = req.url.slice(prefix.length) || '/';
+    }
+    next();
+  });
+}
+
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+
+// ── Opt-in AES-256-GCM payload encryption (x-payload-enc: 1 header) ──────────
+app.use(payloadCrypto);
 
 // ── Global API rate limit: 300 req/min per IP ─────────────────────────────────
 const apiLimiter = createRateLimiter({
@@ -1231,6 +1310,7 @@ app.use('/api/v1/customers', customersRouter);
 app.use('/api/v1/admin', adminPartnersRouter);
 app.use('/api/v1/admin', adminCreditsRouter);
 app.use('/api/v1/admin', adminUsersRouter);
+app.use('/api/v1/admin', adminAnnouncementsRouter);
 app.use('/api/v1/bids', bidsRouter);
 app.use('/api/v1/support', supportRouter);
 app.use('/api/v1/banners', bannersRouter);
@@ -1241,9 +1321,11 @@ app.use('/api/v1/payment-methods', paymentMethodsRouter);
 app.use('/api/v1/auctions', bidsRouter);
 app.use('/api/v1/wishlist', wishlistRouter);
 app.use('/api/v1/reviews', reviewsRouter);
+app.use('/api/v1/feedback', feedbackRouter);
 app.use('/api/v1/recently-viewed', recentlyViewedRouter);
 app.use('/api/v1/marketing', marketingRouter);
 app.use('/api/v1/about', aboutRouter);
+app.use('/api/v1/app-update', appUpdateRouter);
 
 // ── Partner routes ─────────────────────────────────────────────────────────────
 const partnerAuthRouter = require('./features/partner/auth/auth.router');
@@ -1294,5 +1376,20 @@ setInterval(() => {
     console.error('[tokens] cleanup failed:', err.code || err.name),
   );
 }, 6 * 60 * 60 * 1000).unref();
+
+// ── Scheduled announcements: dispatch any whose time has come, every 60s ──────
+const { processDueAnnouncements } = require('./features/announcements/announcements.service');
+setInterval(() => {
+  processDueAnnouncements().catch((err) =>
+    console.error('[announcements] scheduler failed:', err.code || err.name),
+  );
+}, 60 * 1000).unref();
+// First sweep shortly after boot so announcements scheduled while the server
+// was down still go out.
+setTimeout(() => {
+  processDueAnnouncements().catch((err) =>
+    console.error('[announcements] startup sweep failed:', err.code || err.name),
+  );
+}, 20 * 1000).unref();
 
 module.exports = app;
