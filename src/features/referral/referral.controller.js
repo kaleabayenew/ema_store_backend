@@ -75,8 +75,8 @@ async function convertCoins(req, res, next) {
     }
 
     const { coins } = req.body;
-    if (!coins || coins <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid coins amount' });
+    if (!Number.isInteger(coins) || coins <= 0 || coins > 1000000) {
+      return res.status(400).json({ success: false, message: 'Coins must be a whole number between 1 and 1,000,000' });
     }
 
     const result = await convertCoinsToBalance(userId, coins);

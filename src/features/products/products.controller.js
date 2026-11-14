@@ -197,8 +197,11 @@ const getProductReactions = async (req, res, next) => {
     const { id } = req.params;
 
     const reactions = await service.getProductReactions(id);
+    const userVote = req.user?.id
+      ? await service.getUserReaction(id, req.user.id)
+      : null;
 
-    ok(res, reactions);
+    ok(res, { ...reactions, userVote });
   } catch (err) {
     next(err);
   }
@@ -216,7 +219,7 @@ const setProductReaction = async (req, res, next) => {
       return error(res, 'Authentication required', 401);
     }
 
-    if (!reaction || !['like', 'dislike'].includes(reaction)) {
+    if (!reaction || !['like', 'dislike', 'none'].includes(reaction)) {
       return error(res, 'Invalid reaction type', 400);
     }
 
@@ -224,7 +227,7 @@ const setProductReaction = async (req, res, next) => {
 
     const reactions = await service.getProductReactions(id);
 
-    ok(res, { message: 'Reaction updated', ...reactions });
+    ok(res, { message: 'Reaction updated', ...reactions, userVote: reaction === 'none' ? null : reaction });
   } catch (err) {
     next(err);
   }

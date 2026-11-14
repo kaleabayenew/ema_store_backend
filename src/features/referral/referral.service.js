@@ -176,9 +176,10 @@ async function convertCoinsToBalance(userId, coins) {
   try {
     await client.query('BEGIN');
 
-    // Check user's coin balance
+    // Check user's coin balance — row lock prevents double-spend when two
+    // conversions run concurrently.
     const { rows: user } = await client.query(
-      'SELECT coins, balance FROM users WHERE id = $1',
+      'SELECT coins, balance FROM users WHERE id = $1 FOR UPDATE',
       [userId]
     );
 
@@ -210,11 +211,16 @@ async function convertCoinsToBalance(userId, coins) {
     }
     const balanceToAdd = coins / coinsPerUnit;
 
-    // Update user's balance and coins
-    await client.query(
-      'UPDATE users SET coins = coins - $1, balance = balance + $2 WHERE id = $3',
+    // Update user's balance and coins — the coins >= $1 guard makes the
+    // deduction atomic even if the lock were ever bypassed.
+    const { rowCount } = await client.query(
+      'UPDATE users SET coins = coins - $1, balance = balance + $2 WHERE id = $3 AND coins >= $1',
       [coins, balanceToAdd, userId]
     );
+    if (rowCount === 0) {
+      await client.query('ROLLBACK');
+      throw new AppError('Insufficient coins', 400, 'INSUFFICIENT_COINS');
+    }
 
     // Record the conversion so it shows up in transaction history.
     await client.query(

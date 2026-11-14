@@ -38,8 +38,17 @@ router.post('/', optionalAuth, ctrl.createTicket);
 router.get('/conversation-history', authenticate, requireSuperAdmin, ctrl.getConversationHistory);
 router.get('/staff-users', authenticate, requireStaff, ctrl.getStaffUsers);
 
-// Image upload (guests can use this for chat images)
-router.post('/upload-image', optionalAuth, ctrl.uploadChatImage);
+// Image upload (guests can use this for chat images, rate-limited)
+const { createRateLimiter } = require('../../core/middleware/rate_limiter');
+const chatImageUploadLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  keyFn: (req) => `chat-upload|${req.ip}`,
+  message: 'Too many image uploads. Please try again later.',
+  code: 'TOO_MANY_UPLOADS',
+  hideRemaining: true,
+});
+router.post('/upload-image', chatImageUploadLimiter, optionalAuth, ctrl.uploadChatImage);
 
 // ── Parameterised routes LAST ─────────────────────────────────────────────────
 router.get('/:id', optionalAuth, ctrl.getOne);

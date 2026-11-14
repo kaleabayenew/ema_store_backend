@@ -1,6 +1,6 @@
 ﻿const { Router } = require('express');
 const ctrl = require('./products.controller');
-const { requireAuth } = require('../../core/middleware/auth');
+const { requireAuth, requireSuperAdmin, optionalAuth } = require('../../core/middleware/auth');
 
 const router = Router();
 
@@ -13,13 +13,13 @@ router.get('/categories', ctrl.getAllCategories);
 router.get('/:id', ctrl.getProductById);
 router.get('/:id/reviews', ctrl.getProductReviews);
 router.get('/:id/seller-offers', ctrl.getSellerOffers);
-router.get('/:id/reactions', ctrl.getProductReactions);
+router.get('/:id/reactions', optionalAuth, ctrl.getProductReactions);
 router.get('/:id/viewers', ctrl.getProductViewers);
 
-// ── Admin/Partner endpoints (require auth) ───────────────────────────────
-router.post('/', requireAuth, ctrl.createProduct);
-router.patch('/:id', requireAuth, ctrl.updateProduct);
-router.delete('/:id', requireAuth, ctrl.deleteProduct);
+// ── Admin endpoints (Super Admin only — customers must not mutate catalog) ──
+router.post('/', requireSuperAdmin, ctrl.createProduct);
+router.patch('/:id', requireSuperAdmin, ctrl.updateProduct);
+router.delete('/:id', requireSuperAdmin, ctrl.deleteProduct);
 router.post('/:id/reactions', requireAuth, ctrl.setProductReaction);
 
 module.exports = router;

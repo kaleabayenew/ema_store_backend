@@ -85,10 +85,27 @@ async function listStaffUsers({ search, role, status, page = 1, limit = 50 } = {
  * Create a new staff user. Phone is required (UNIQUE NOT NULL); generate a
  * unique placeholder if the caller didn't supply one.
  */
+const STAFF_PASSWORD_MIN = 12;
+const STAFF_PASSWORD_MAX = 72;
+const COMMON_STAFF_PASSWORDS = new Set([
+  'password', 'password1', 'password123', 'passw0rd', 'p@ssw0rd', 'qwerty123',
+  'welcome123', 'admin1234', 'letmein123', 'changeme123', 'iloveyou123',
+]);
+
+function assertStrongStaffPassword(password) {
+  const weak = () =>
+    new AppError(
+      'Password must be 12-72 characters with at least one letter and one number, and must not be a common password.',
+      400,
+      'WEAK_PASSWORD',
+    );
+  if (typeof password !== 'string' || password.length < STAFF_PASSWORD_MIN || password.length > STAFF_PASSWORD_MAX) throw weak();
+  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) throw weak();
+  if (COMMON_STAFF_PASSWORDS.has(password.toLowerCase())) throw weak();
+}
+
 async function createStaffUser({ fullName, email, phone, password, role, allowedPages }) {
-  if (!password || password.length < 6) {
-    throw new AppError('Password must be at least 6 characters.', 400, 'WEAK_PASSWORD');
-  }
+  assertStrongStaffPassword(password);
   if (!STAFF_ROLES.includes(role)) {
     throw new AppError('Invalid staff role.', 400, 'INVALID_ROLE');
   }
@@ -115,9 +132,9 @@ async function createStaffUser({ fullName, email, phone, password, role, allowed
     await client.query('BEGIN');
     const { rows: userRows } = await client.query(
       `INSERT INTO users (phone, email, full_name, password_hash, password_plain, role, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, true)
+       VALUES ($1, $2, $3, $4, NULL, $5, true)
        RETURNING id, phone, email, full_name, role, is_active`,
-      [finalPhone, email || null, fullName || null, passwordHash, password, role],
+      [finalPhone, email || null, fullName || null, passwordHash, role],
     );
     const u = userRows[0];
 
@@ -216,13 +233,11 @@ async function getStaffUser(id) {
  * Reset a staff user's password.
  */
 async function resetStaffPassword(id, newPassword) {
-  if (!newPassword || newPassword.length < 6) {
-    throw new AppError('Password must be at least 6 characters.', 400, 'WEAK_PASSWORD');
-  }
+  assertStrongStaffPassword(newPassword);
   const hash = await bcrypt.hash(newPassword, 12);
   const { rowCount } = await pool.query(
-    `UPDATE users SET password_hash = $1, password_plain = $2, updated_at = NOW() WHERE id = $3`,
-    [hash, newPassword, id],
+    `UPDATE users SET password_hash = $1, password_plain = NULL, updated_at = NOW() WHERE id = $2`,
+    [hash, id],
   );
   if (rowCount === 0) throw new AppError('User not found.', 404, 'NOT_FOUND');
 }

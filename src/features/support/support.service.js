@@ -73,6 +73,22 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
       [ticket.id, userId || null, userId ? null : guestId, initialMessage],
     );
 
+    // Auto welcome greeting — only on a brand-new ticket, never on reuse
+    let greeting = null;
+    if (!wasReused) {
+      const settings = await getSupportSettings();
+      if (settings.isAutoReplyEnabled && settings.welcomeMessage) {
+        const greetRes = await client.query(
+          `INSERT INTO support_messages (ticket_id, sender_id, guest_id, body, is_staff)
+           VALUES ($1, NULL, NULL, $2, true)
+           RETURNING *`,
+          [ticket.id, settings.welcomeMessage],
+        );
+        const g = greetRes.rows[0];
+        greeting = { id: g.id, body: g.body, isStaff: true, sentAt: g.sent_at };
+      }
+    }
+
     await client.query('COMMIT');
     return {
       id: ticket.id,
@@ -88,6 +104,7 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
         isStaff: false,
         sentAt: messageRes.rows[0].sent_at,
       },
+      greeting,
     };
   } catch (e) {
     await client.query('ROLLBACK');
@@ -304,6 +321,7 @@ async function getTicket(id) {
     customerPhone: t.customer_phone ?? '',
     customerEmail: t.customer_email ?? '',
     guestId:       t.guest_id ?? null,
+    userId:        t.user_id ?? null,
     isPartner:     isPartner,
     userRole:      t.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER'),
     shopName:      t.shop_name ?? null,
@@ -738,9 +756,19 @@ async function getPreviousTicketsForCustomer(userId, guestId, currentTicketId) {
 
 // This is handled in the controller directly with saveChatImage from storage
 
+// Lightweight owner lookup for access checks (no joins, no presigned URLs).
+async function getTicketOwner(id) {
+  const { rows } = await pool.query(
+    `SELECT user_id, guest_id FROM support_tickets WHERE id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+
 module.exports = {
   listTickets,
   getTicket,
+  getTicketOwner,
   addReply,
   updateStatus,
   createTicket,

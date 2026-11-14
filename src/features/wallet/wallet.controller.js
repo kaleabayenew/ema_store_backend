@@ -87,6 +87,48 @@ exports.createTransaction = async (req, res) => {
   }
 };
 
+// POST /wallet/deposit — customer deposit request (PENDING until confirmed)
+exports.deposit = async (req, res) => {
+  try {
+    const result = await walletService.deposit(req.user.id, {
+      amount: req.body.amount,
+      paymentMethod: req.body.payment_method,
+      reference: req.body.reference,
+      idempotencyKey: req.get('Idempotency-Key') || req.body.idempotency_key || null,
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  } catch (error) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Deposit failed',
+      code: error.code,
+    });
+  }
+};
+
+// POST /wallet/withdraw — customer withdrawal request (debited, PENDING payout)
+exports.withdraw = async (req, res) => {
+  try {
+    const result = await walletService.withdraw(req.user.id, {
+      amount: req.body.amount,
+      paymentMethod: req.body.payment_method,
+      accountNumber: req.body.account_number,
+      accountName: req.body.account_name,
+      authVerification: req.body.auth_verification,
+      idempotencyKey: req.get('Idempotency-Key') || req.body.idempotency_key || null,
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  } catch (error) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Withdrawal failed',
+      code: error.code,
+    });
+  }
+};
+
 // Get balance history
 exports.getBalanceHistory = async (req, res) => {
   try {

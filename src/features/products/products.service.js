@@ -549,7 +549,7 @@ async function setReaction(productId, userId, reaction) {
 
     if (existing.length > 0) {
       // Update existing reaction
-      if (reaction === existing[0].reaction_type) {
+      if (reaction === 'none' || reaction === existing[0].reaction_type) {
         // Remove reaction if same
         await client.query(
           'DELETE FROM product_reactions WHERE product_id = $1 AND user_id = $2',
@@ -562,7 +562,7 @@ async function setReaction(productId, userId, reaction) {
           [reaction, productId, userId],
         );
       }
-    } else {
+    } else if (reaction !== 'none') {
       // Insert new reaction
       await client.query(
         `INSERT INTO product_reactions (product_id, user_id, reaction_type)
