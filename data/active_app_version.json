@@ -1,0 +1,13 @@
+{
+  "customer": {
+    "latestVersion": "0.1.0",
+    "latestBuild": 1,
+    "minVersion": "0.1.0",
+    "minBuild": 1,
+    "forceUpdate": false,
+    "releaseNotes": "New update from Ema Store",
+    "apkUrl": "https://pixeldrain.com/api/file/HWuYBwUa",
+    "telegramUrl": "",
+    "updatedAt": "2026-11-14T12:30:03.636Z"
+  }
+}
