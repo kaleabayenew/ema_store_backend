@@ -662,8 +662,18 @@ async function autoMigrate() {
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
       `);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
+      // The live reviews table may use the legacy customer_id schema — only
+      // index user_id when that column actually exists.
+      const reviewCols = await pool.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'reviews'`
+      );
+      const reviewColSet = new Set(reviewCols.rows.map(r => r.column_name));
+      if (reviewColSet.has('product_id')) {
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
+      }
+      if (reviewColSet.has('user_id')) {
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
+      }
       console.log('[Migration] ✓ Reviews table');
 
       // ── One-time cleanup: merge duplicate open guest tickets into the newest one ──
@@ -801,9 +811,21 @@ async function autoMigrate() {
           UNIQUE(user_id, product_id)
         );
       `);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_rating ON reviews(rating)`);
+      // Existing installs may have the legacy reviews schema (customer_id,
+      // no user_id) — index only columns that actually exist.
+      const revCols = await pool.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'reviews'`
+      );
+      const revColSet = new Set(revCols.rows.map(r => r.column_name));
+      if (revColSet.has('user_id')) {
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_user_id ON reviews(user_id)`);
+      }
+      if (revColSet.has('product_id')) {
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_product_id ON reviews(product_id)`);
+      }
+      if (revColSet.has('rating')) {
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_reviews_rating ON reviews(rating)`);
+      }
       console.log('[Migration] ✓ Reviews table');
     } catch (e) {
       console.log('[Migration] ⚠ Reviews table already exists or error:', e.message);
@@ -1018,6 +1040,46 @@ async function autoMigrate() {
       console.log('[Migration] ✓ Coin settings table');
     } catch (e) {
       console.log('[Migration] ⚠ Coin settings table:', e.message);
+    }
+
+    // App version/release config — DB-backed so approvals work across
+    // environments (Render's filesystem is ephemeral; local data/ files
+    // are not shared with production).
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS app_version_config (
+          app_type       VARCHAR(20) PRIMARY KEY,
+          latest_version VARCHAR(50) NOT NULL,
+          latest_build   INTEGER NOT NULL DEFAULT 1,
+          min_version    VARCHAR(50),
+          min_build      INTEGER DEFAULT 1,
+          force_update   BOOLEAN DEFAULT false,
+          release_notes  TEXT,
+          apk_url        TEXT,
+          telegram_url   TEXT,
+          updated_at     TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS app_pending_releases (
+          release_id     VARCHAR(64) PRIMARY KEY,
+          app            VARCHAR(20) NOT NULL,
+          version        VARCHAR(50) NOT NULL,
+          build_number   INTEGER NOT NULL DEFAULT 1,
+          min_version    VARCHAR(50),
+          force_update   BOOLEAN DEFAULT false,
+          release_notes  TEXT,
+          apk_url        TEXT,
+          telegram_url   TEXT,
+          status         VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+          created_at     TIMESTAMPTZ DEFAULT NOW(),
+          approved_at    TIMESTAMPTZ,
+          rejected_at    TIMESTAMPTZ
+        )
+      `);
+      console.log('[Migration] ✓ App version config table');
+    } catch (e) {
+      console.log('[Migration] ⚠ App version config table:', e.message);
     }
 
     // Create user_coupons table
