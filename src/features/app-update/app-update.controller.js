@@ -13,7 +13,7 @@ const getAppVersion = async (req, res, next) => {
     const appType = (req.query.app || 'customer').toLowerCase();
     const platform = (req.query.platform || 'android').toLowerCase();
 
-    const activeConfig = getActiveVersionConfig(appType);
+    const activeConfig = await getActiveVersionConfig(appType);
 
     const telegramChannel = process.env.TELEGRAM_CHANNEL_URL || 'https://t.me/emastore_official';
     const telegramBot = process.env.TELEGRAM_BOT_USERNAME
