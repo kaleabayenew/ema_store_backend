@@ -130,11 +130,23 @@ const submitReleaseForApproval = async ({
 
   // apkPath must point inside the backend data directory — never let a
   // caller make the server read and send arbitrary files (e.g. .env).
+  // apkPath is validated against allowed directories:
+  //   1. backend/data/   (server-managed uploads)
+  //   2. customer/build/ (Flutter release APK output)
+  //   3. partner/build/  (Flutter release APK output)
+  // This prevents the caller from making the server send arbitrary files (e.g. .env).
   let safeApkPath = null;
   if (apkPath) {
     const resolved = path.resolve(String(apkPath));
     const allowedDir = path.resolve(DATA_DIR);
     if (resolved.startsWith(allowedDir + path.sep) && resolved.toLowerCase().endsWith('.apk') && fs.existsSync(resolved)) {
+    const allowedDirs = [
+      path.resolve(DATA_DIR),
+      path.resolve(path.join(__dirname, '../../../../customer/build')),
+      path.resolve(path.join(__dirname, '../../../../partner/build')),
+    ];
+    const isAllowed = allowedDirs.some(dir => resolved.startsWith(dir + path.sep) || resolved.startsWith(dir + '/'));
+    if (isAllowed && resolved.toLowerCase().endsWith('.apk') && fs.existsSync(resolved)) {
       safeApkPath = resolved;
     }
   }
