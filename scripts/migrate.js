@@ -159,6 +159,27 @@ async function migrate() {
     `);
     console.log('✓ FCM tokens table created');
 
+    // Create about_content table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS about_content (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        mission TEXT,
+        vision TEXT,
+        values TEXT,
+        story TEXT,
+        image_url TEXT,
+        contact_email VARCHAR(255),
+        contact_phone VARCHAR(50),
+        social_links JSONB,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ About content table created');
+
     console.log('\n✅ Migration completed successfully!');
   } catch (error) {
     console.error('❌ Migration failed:', error);

@@ -186,15 +186,43 @@ async function migrate() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS flash_deals (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
-        discount_percentage DECIMAL(5, 2) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        discount_percent INTEGER NOT NULL,
         starts_at TIMESTAMP NOT NULL,
         ends_at TIMESTAMP NOT NULL,
+        image_url TEXT,
         is_active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_by UUID REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('✓ Flash deals table created');
+
+    // Create flash_deal_products table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS flash_deal_products (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        flash_deal_id UUID NOT NULL REFERENCES flash_deals(id) ON DELETE CASCADE,
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(flash_deal_id, product_id)
+      );
+    `);
+    console.log('✓ Flash deal products table created');
+
+    // Create flash_deal_categories table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS flash_deal_categories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        flash_deal_id UUID NOT NULL REFERENCES flash_deals(id) ON DELETE CASCADE,
+        category_id VARCHAR(50) NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(flash_deal_id, category_id)
+      );
+    `);
+    console.log('✓ Flash deal categories table created');
 
     // Add starts_at column if it doesn't exist (migrate from start_time)
     try {
@@ -461,6 +489,19 @@ async function migrate() {
       );
     `);
     console.log('✓ Seller offers table created');
+
+    // Create product_reactions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_reactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reaction VARCHAR(20) NOT NULL CHECK (reaction IN ('like', 'dislike')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(product_id, user_id)
+      );
+    `);
+    console.log('✓ Product reactions table created');
 
     console.log('\n✅ Neon database migration completed successfully!');
   } catch (error) {
