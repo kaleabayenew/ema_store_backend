@@ -216,7 +216,34 @@ async function getAllProducts({
 
   const { rows } = await pool.query(query, pageParams);
   const formatter = lean ? _formatProductForList : _formatProduct;
-  return { products: rows.map(formatter), total, approved, pending, avgRating };
+  const products = rows.map(formatter);
+
+  if (!lean && products.length > 0) {
+    try {
+      const ids = products.map(p => p.id);
+      const { rows: allImgs } = await pool.query(
+        `SELECT product_id, image_url, is_primary, sort_order
+         FROM product_images
+         WHERE product_id = ANY($1::uuid[])
+         ORDER BY sort_order, created_at`,
+        [ids],
+      );
+      const imagesByProduct = {};
+      for (const img of allImgs) {
+        (imagesByProduct[img.product_id] ||= []).push(img);
+      }
+      for (const p of products) {
+        const pImgs = imagesByProduct[p.id] || [];
+        p.images = pImgs;
+        p.imageUrls = pImgs.map(i => i.image_url);
+        if (!p.primaryImageUrl && pImgs.length > 0) {
+          p.primaryImageUrl = pImgs[0].image_url;
+        }
+      }
+    } catch (_) {}
+  }
+
+  return { products, total, approved, pending, avgRating };
 }
 
 async function _legacy_mapping_getAllProducts() {
@@ -635,13 +662,23 @@ async function createProduct(data) {
 
     const product = _formatProduct(rows[0]);
 
-    // Add images
-    for (let i = 0; i < images.length; i++) {
-      await client.query(
-        `INSERT INTO product_images (product_id, image_url, is_primary, sort_order)
-         VALUES ($1, $2, $3, $4)`,
-        [product.id, images[i].url, i === 0, i],
-      );
+    // Add images (supports string URLs, { url }, { imageUrl }, { image_url })
+    const incomingImages = Array.isArray(images) && images.length > 0
+      ? images
+      : (Array.isArray(data.imageUrls) ? data.imageUrls : []);
+
+    for (let i = 0; i < incomingImages.length; i++) {
+      const item = incomingImages[i];
+      const imgUrl = typeof item === 'string'
+        ? item
+        : (item?.url || item?.imageUrl || item?.image_url);
+      if (imgUrl) {
+        await client.query(
+          `INSERT INTO product_images (product_id, image_url, is_primary, sort_order)
+           VALUES ($1, $2, $3, $4)`,
+          [product.id, imgUrl, i === 0, i],
+        );
+      }
     }
 
     await client.query('COMMIT');
@@ -693,6 +730,28 @@ async function updateProduct(id, data) {
 
   if (rows.length === 0) {
     throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
+  }
+
+  // Update images if provided
+  const incomingImages = Array.isArray(data.images)
+    ? data.images
+    : (Array.isArray(data.imageUrls) ? data.imageUrls : null);
+
+  if (incomingImages !== null) {
+    await pool.query('DELETE FROM product_images WHERE product_id = $1', [id]);
+    for (let i = 0; i < incomingImages.length; i++) {
+      const item = incomingImages[i];
+      const imgUrl = typeof item === 'string'
+        ? item
+        : (item?.url || item?.imageUrl || item?.image_url);
+      if (imgUrl) {
+        await pool.query(
+          `INSERT INTO product_images (product_id, image_url, is_primary, sort_order)
+           VALUES ($1, $2, $3, $4)`,
+          [id, imgUrl, i === 0, i],
+        );
+      }
+    }
   }
 
   return getProductById(id);
