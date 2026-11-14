@@ -42,7 +42,7 @@ const registerAppUpdateBotHandlers = (bot) => {
           show_alert: true,
         });
 
-        // Always strip the inline buttons first
+        // Strip the inline buttons so it cannot be tapped again
         try {
           await bot.editMessageReplyMarkup(
             { inline_keyboard: [] },
@@ -50,34 +50,23 @@ const registerAppUpdateBotHandlers = (bot) => {
           );
         } catch (_) {}
 
-        // Attempt to update message text or delete
+        // Keep the APK in chat and append the live approval timestamp
+        const statusNotice = `\n\n✅ *STATUS: APPROVED & LIVE*\n⏰ *Time:* ${new Date().toLocaleString()}`;
         try {
-          await bot.deleteMessage(chatId, messageId);
-        } catch (_) {
-          const newText = [
-            `🎉 *RELEASE APPROVED & PUBLISHED!*`,
-            ``,
-            `📱 *App:* ${result.release.app.toUpperCase()}`,
-            `🏷 *Live Version:* v${result.release.version} (Build ${result.release.buildNumber})`,
-            `⏰ *Approved At:* ${new Date().toLocaleString()}`,
-          ].join('\n');
-
-          try {
-            if (query.message.caption) {
-              await bot.editMessageCaption(newText, {
-                chat_id: chatId,
-                message_id: messageId,
-                parse_mode: 'Markdown',
-              });
-            } else {
-              await bot.editMessageText(newText, {
-                chat_id: chatId,
-                message_id: messageId,
-                parse_mode: 'Markdown',
-              });
-            }
-          } catch (_) {}
-        }
+          if (query.message?.caption) {
+            await bot.editMessageCaption(query.message.caption + statusNotice, {
+              chat_id: chatId,
+              message_id: messageId,
+              parse_mode: 'Markdown',
+            });
+          } else if (query.message?.text) {
+            await bot.editMessageText(query.message.text + statusNotice, {
+              chat_id: chatId,
+              message_id: messageId,
+              parse_mode: 'Markdown',
+            });
+          }
+        } catch (_) {}
       } else {
         await bot.answerCallbackQuery(query.id, {
           text: result.message,
@@ -99,31 +88,30 @@ const registerAppUpdateBotHandlers = (bot) => {
         show_alert: true,
       });
 
+      // Strip buttons and mark rejected
       try {
-        await bot.deleteMessage(chatId, messageId);
-      } catch (_) {
-        const newText = [
-          `❌ *RELEASE REJECTED & CANCELLED*`,
-          `Version: v${result.release?.version || 'N/A'}`,
-          `Time: ${new Date().toLocaleString()}`,
-        ].join('\n');
+        await bot.editMessageReplyMarkup(
+          { inline_keyboard: [] },
+          { chat_id: chatId, message_id: messageId }
+        );
+      } catch (_) {}
 
-        if (query.message.caption) {
-          await bot.editMessageCaption(newText, {
+      const rejectNotice = `\n\n❌ *STATUS: REJECTED & CANCELLED*\n⏰ *Time:* ${new Date().toLocaleString()}`;
+      try {
+        if (query.message?.caption) {
+          await bot.editMessageCaption(query.message.caption + rejectNotice, {
             chat_id: chatId,
             message_id: messageId,
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] },
           });
-        } else {
-          await bot.editMessageText(newText, {
+        } else if (query.message?.text) {
+          await bot.editMessageText(query.message.text + rejectNotice, {
             chat_id: chatId,
             message_id: messageId,
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] },
           });
         }
-      }
+      } catch (_) {}
     }
   });
 

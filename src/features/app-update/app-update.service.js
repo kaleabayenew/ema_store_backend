@@ -29,17 +29,15 @@ const getBot = () => {
   return _botInstance;
 };
 
-// Read active versions — Postgres is the source of truth (shared across
-// environments); the local JSON file is only a fallback/cache.
+// Active version config — Postgres is the source of truth so approvals are
+// shared across environments (Render's filesystem is ephemeral). The local
+// JSON file is kept only as a fallback/cache.
 const getActiveVersionConfig = async (appType = 'customer') => {
   const isCustomer = appType.toLowerCase() === 'customer';
   const key = appType.toLowerCase();
 
   try {
-    const r = await pool.query(
-      `SELECT * FROM app_version_config WHERE app_type = $1`,
-      [key]
-    );
+    const r = await pool.query(`SELECT * FROM app_version_config WHERE app_type = $1`, [key]);
     if (r.rows.length) {
       const d = r.rows[0];
       return {
@@ -54,15 +52,13 @@ const getActiveVersionConfig = async (appType = 'customer') => {
         updatedAt: d.updated_at,
       };
     }
-  } catch (_) {
-    // Table may not exist yet on a fresh deploy — fall through to file/env.
-  }
+  } catch (_) {}
 
   let saved = {};
   if (fs.existsSync(ACTIVE_VERSION_FILE)) {
     try {
       saved = JSON.parse(fs.readFileSync(ACTIVE_VERSION_FILE, 'utf8'));
-    } catch (_) {}
+    } catch (_) { }
   }
 
   const appData = saved[key] || {};
@@ -115,12 +111,11 @@ const saveActiveVersionConfig = async (appType, newConfig) => {
     console.warn('[app-update] DB save failed, falling back to file:', e.message);
   }
 
-  // Keep the local file in sync as a fallback/cache.
   let saved = {};
   if (fs.existsSync(ACTIVE_VERSION_FILE)) {
     try {
       saved = JSON.parse(fs.readFileSync(ACTIVE_VERSION_FILE, 'utf8'));
-    } catch (_) {}
+    } catch (_) { }
   }
 
   saved[key] = {
@@ -133,7 +128,7 @@ const saveActiveVersionConfig = async (appType, newConfig) => {
 };
 
 // Pending releases live in Postgres so the Telegram approve button works no
-// matter which backend instance receives the callback (local dev vs Render).
+// matter which backend instance receives the callback.
 const getPendingReleases = async () => {
   try {
     const r = await pool.query(`SELECT * FROM app_pending_releases`);
@@ -149,6 +144,8 @@ const getPendingReleases = async () => {
         releaseNotes: row.release_notes,
         apkUrl: row.apk_url,
         telegramUrl: row.telegram_url,
+        apkPath: row.apk_path || null,
+        telegramFileId: row.telegram_file_id || null,
         status: row.status,
         createdAt: row.created_at,
         approvedAt: row.approved_at,
@@ -156,9 +153,7 @@ const getPendingReleases = async () => {
       };
     }
     return map;
-  } catch (_) {
-    // Table missing (pre-migration) — fall back to the local file.
-  }
+  } catch (_) {}
 
   if (!fs.existsSync(PENDING_RELEASES_FILE)) return {};
   try {
@@ -176,13 +171,15 @@ const savePendingReleases = async (releases) => {
       await pool.query(
         `INSERT INTO app_pending_releases
            (release_id, app, version, build_number, min_version, force_update,
-            release_notes, apk_url, telegram_url, status, created_at,
-            approved_at, rejected_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            release_notes, apk_url, telegram_url, apk_path, telegram_file_id,
+            status, created_at, approved_at, rejected_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (release_id) DO UPDATE SET
-           status        = EXCLUDED.status,
-           approved_at   = EXCLUDED.approved_at,
-           rejected_at   = EXCLUDED.rejected_at`,
+           status           = EXCLUDED.status,
+           apk_url          = EXCLUDED.apk_url,
+           telegram_file_id = EXCLUDED.telegram_file_id,
+           approved_at      = EXCLUDED.approved_at,
+           rejected_at      = EXCLUDED.rejected_at`,
         [
           id,
           rel.app,
@@ -193,6 +190,8 @@ const savePendingReleases = async (releases) => {
           rel.releaseNotes ?? '',
           rel.apkUrl ?? '',
           rel.telegramUrl ?? '',
+          rel.apkPath ?? null,
+          rel.telegramFileId ?? null,
           rel.status ?? 'PENDING',
           rel.createdAt ?? new Date().toISOString(),
           rel.approvedAt ?? null,
@@ -204,7 +203,6 @@ const savePendingReleases = async (releases) => {
     console.warn('[app-update] DB pending-release save failed:', e.message);
   }
 
-  // Mirror to the local file as a fallback/cache.
   try {
     fs.writeFileSync(PENDING_RELEASES_FILE, JSON.stringify(releases, null, 2), 'utf8');
   } catch (_) {}
@@ -236,24 +234,6 @@ const submitReleaseForApproval = async ({
   const appDisplayName = app.toLowerCase() === 'customer' ? 'Customer App' : 'Partner App';
   const safeApkUrl = /^https?:\/\//i.test(String(apkUrl)) ? String(apkUrl).slice(0, 500) : '';
 
-  const pendingData = {
-    releaseId,
-    app: app.toLowerCase(),
-    version,
-    buildNumber: parseInt(buildNumber, 10) || 1,
-    minVersion: minVersion || version,
-    forceUpdate: forceUpdate === true || forceUpdate === 'true',
-    releaseNotes,
-    apkUrl: safeApkUrl,
-    telegramUrl,
-    status: 'PENDING',
-    createdAt: new Date().toISOString(),
-  };
-
-  const releases = await getPendingReleases();
-  releases[releaseId] = pendingData;
-  await savePendingReleases(releases);
-
   // apkPath is validated against allowed directories:
   //   1. backend/data/   (server-managed uploads)
   //   2. customer/build/ (Flutter release APK output)
@@ -272,6 +252,25 @@ const submitReleaseForApproval = async ({
       safeApkPath = resolved;
     }
   }
+
+  const pendingData = {
+    releaseId,
+    app: app.toLowerCase(),
+    version,
+    buildNumber: parseInt(buildNumber, 10) || 1,
+    minVersion: minVersion || version,
+    forceUpdate: forceUpdate === true || forceUpdate === 'true',
+    releaseNotes,
+    apkUrl: safeApkUrl,
+    apkPath: safeApkPath || null,
+    telegramUrl,
+    status: 'PENDING',
+    createdAt: new Date().toISOString(),
+  };
+
+  const releases = await getPendingReleases();
+  releases[releaseId] = pendingData;
+  await savePendingReleases(releases);
 
   const caption = [
     `🚀 *NEW APP RELEASE READY FOR APPROVAL*`,
@@ -314,9 +313,10 @@ const submitReleaseForApproval = async ({
 
   // If a validated APK file exists on disk and fits, send as document with
   // caption and buttons; otherwise send the formatted message.
+  let sentMsg = null;
   if (safeApkPath && !apkTooLarge) {
     try {
-      await botClient.sendDocument(ownerId, fs.createReadStream(safeApkPath), {
+      sentMsg = await botClient.sendDocument(ownerId, fs.createReadStream(safeApkPath), {
         caption: finalCaption,
         parse_mode: 'Markdown',
         reply_markup: replyMarkup,
@@ -324,17 +324,24 @@ const submitReleaseForApproval = async ({
     } catch (docErr) {
       // e.g. ETELEGRAM 413 — fall back to the text message so approval still works.
       console.warn('[app-update] APK document send failed, falling back to message:', docErr.message);
-      await botClient.sendMessage(ownerId, finalCaption, {
+      sentMsg = await botClient.sendMessage(ownerId, finalCaption, {
         parse_mode: 'Markdown',
         reply_markup: replyMarkup,
       });
     }
   } else {
     // Send formatted message
-    await botClient.sendMessage(ownerId, finalCaption, {
+    sentMsg = await botClient.sendMessage(ownerId, finalCaption, {
       parse_mode: 'Markdown',
       reply_markup: replyMarkup,
     });
+  }
+
+  // Save the telegram file_id if document was uploaded so user broadcasts are instantaneous
+  if (sentMsg?.document?.file_id) {
+    pendingData.telegramFileId = sentMsg.document.file_id;
+    releases[releaseId] = pendingData;
+    await savePendingReleases(releases);
   }
 
   return { success: true, releaseId };
@@ -389,11 +396,168 @@ const approveRelease = async (releaseId, bot) => {
   releases[releaseId] = rel;
   await savePendingReleases(releases);
 
+  // Automatically broadcast APK & release announcement to all users who started the bot
+  broadcastReleaseToUsers(rel, bot).catch(err => {
+    console.error('[app-update] Broadcast error:', err.message);
+  });
+
   return {
     success: true,
     release: rel,
-    message: `✅ Version v${rel.version} (Build ${rel.buildNumber}) is now LIVE! All apps will prompt users to update.`,
+    message: `✅ Version v${rel.version} (Build ${rel.buildNumber}) is now LIVE! Broadcast is sending to all bot users.`,
   };
+};
+
+const SUBSCRIBERS_FILE = path.join(DATA_DIR, 'bot_subscribers.json');
+
+/**
+ * Records any user who starts or interacts with the bot so they receive update broadcasts.
+ */
+const recordSubscriber = (chatId, username) => {
+  if (!chatId) return;
+  try {
+    let subs = {};
+    if (fs.existsSync(SUBSCRIBERS_FILE)) {
+      subs = JSON.parse(fs.readFileSync(SUBSCRIBERS_FILE, 'utf8'));
+    }
+    subs[String(chatId)] = {
+      chatId: String(chatId),
+      username: username || null,
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(SUBSCRIBERS_FILE, JSON.stringify(subs, null, 2), 'utf8');
+  } catch (_) {}
+};
+
+/**
+ * Broadcasts the approved APK and release notes to all users who started the bot.
+ */
+const broadcastReleaseToUsers = async (rel, botInstance) => {
+  const botClient = botInstance || getBot();
+  if (!botClient) return { sentCount: 0, failedCount: 0 };
+
+  const ownerId = String(getOwnerChatId());
+  const recipientIds = new Set();
+
+  // 1. From database table telegram_chat_ids
+  try {
+    const { pool } = require('../../core/config/database');
+    const { rows } = await pool.query('SELECT DISTINCT chat_id FROM telegram_chat_ids WHERE chat_id IS NOT NULL');
+    for (const r of rows) {
+      if (r.chat_id) recipientIds.add(String(r.chat_id));
+    }
+  } catch (err) {
+    console.warn('[app-update] Failed to fetch db telegram chat IDs:', err.message);
+  }
+
+  // 2. From bot subscribers file (everyone who ran /start or messaged the bot)
+  try {
+    if (fs.existsSync(SUBSCRIBERS_FILE)) {
+      const subs = JSON.parse(fs.readFileSync(SUBSCRIBERS_FILE, 'utf8'));
+      for (const id of Object.keys(subs)) {
+        if (id) recipientIds.add(String(id));
+      }
+    }
+  } catch (_) {}
+
+  if (recipientIds.size === 0) {
+    console.log('[app-update] No users to broadcast to yet.');
+    try {
+      await botClient.sendMessage(
+        ownerId,
+        `ℹ️ Release v${rel.version} is now LIVE, but no subscribed bot users were found to broadcast to.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (_) {}
+    return { sentCount: 0, failedCount: 0 };
+  }
+
+  console.log(`[app-update] Broadcasting release v${rel.version} to ${recipientIds.size} users...`);
+
+  // Locate the APK file
+  const appDisplayName = rel.app.toLowerCase() === 'customer' ? 'Customer App' : 'Partner App';
+  let apkPath = rel.apkPath;
+  if (!apkPath || !fs.existsSync(apkPath)) {
+    const defaultArm64 = path.resolve(path.join(__dirname, `../../../../${rel.app}/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`));
+    const defaultFat = path.resolve(path.join(__dirname, `../../../../${rel.app}/build/app/outputs/flutter-apk/app-release.apk`));
+    if (fs.existsSync(defaultArm64)) apkPath = defaultArm64;
+    else if (fs.existsSync(defaultFat)) apkPath = defaultFat;
+  }
+
+  const hasApkFile = apkPath && fs.existsSync(apkPath) && fs.statSync(apkPath).size <= 49 * 1024 * 1024;
+  let cachedFileId = rel.telegramFileId || null;
+
+  const caption = [
+    `🎉 *NEW UPDATE AVAILABLE!*`,
+    ``,
+    `📱 *Ema Store ${appDisplayName}*`,
+    `🏷 *Version:* v${rel.version} (Build ${rel.buildNumber})`,
+    `⚠️ *Type:* ${rel.forceUpdate ? '🚨 Mandatory Update' : '🟢 Recommended Update'}`,
+    ``,
+    `📝 *What's New:*`,
+    rel.releaseNotes || '• New performance improvements and live updates.',
+    ``,
+    (hasApkFile || cachedFileId)
+      ? `⬇️ *Download the APK file attached to this message and tap it to install.*`
+      : (rel.apkUrl ? `⬇️ *Tap below to download the latest version:*` : ''),
+  ].filter(Boolean).join('\n');
+
+  const replyMarkup = rel.apkUrl ? {
+    inline_keyboard: [
+      [{ text: '⬇️ Download APK Directly', url: rel.apkUrl }]
+    ]
+  } : undefined;
+
+  let sentCount = 0;
+  let failedCount = 0;
+
+  for (const chatId of recipientIds) {
+    try {
+      if (cachedFileId) {
+        // Fast instant delivery via Telegram server cache
+        await botClient.sendDocument(chatId, cachedFileId, {
+          caption,
+          parse_mode: 'Markdown',
+          reply_markup: replyMarkup,
+        });
+      } else if (hasApkFile) {
+        const sent = await botClient.sendDocument(chatId, fs.createReadStream(apkPath), {
+          caption,
+          parse_mode: 'Markdown',
+          reply_markup: replyMarkup,
+        });
+        if (sent?.document?.file_id && !cachedFileId) {
+          cachedFileId = sent.document.file_id;
+        }
+      } else {
+        await botClient.sendMessage(chatId, caption, {
+          parse_mode: 'Markdown',
+          reply_markup: replyMarkup,
+        });
+      }
+      sentCount++;
+    } catch (err) {
+      failedCount++;
+      console.warn(`[app-update] Failed to send update to chat ${chatId}:`, err.message);
+    }
+    // Small delay between sends to respect Telegram rate limits
+    await new Promise(r => setTimeout(r, 60));
+  }
+
+  console.log(`[app-update] Broadcast complete: ${sentCount} sent, ${failedCount} failed.`);
+
+  // Send summary confirmation to the owner
+  try {
+    await botClient.sendMessage(
+      ownerId,
+      `📢 *Broadcast Completed!*\n\nSuccessfully sent APK release v${rel.version} (Build ${rel.buildNumber}) to *${sentCount}* user(s).${failedCount > 0 ? `\n⚠️ Failed for ${failedCount} user(s).` : ''}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    console.warn('[app-update] Failed to notify owner of broadcast result:', err.message);
+  }
+
+  return { sentCount, failedCount };
 };
 
 /**
@@ -426,5 +590,7 @@ module.exports = {
   submitReleaseForApproval,
   approveRelease,
   rejectRelease,
+  recordSubscriber,
+  broadcastReleaseToUsers,
 };
 
