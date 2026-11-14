@@ -1,5 +1,6 @@
 const { pool } = require('../../core/config/database');
 const { normalizePhone } = require('../auth/auth.service');
+const { recordSubscriber } = require('../app-update/app-update.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Telegram linking — called ONLY by our own bot (x-bot-key, see routes file).
@@ -62,6 +63,7 @@ async function linkTelegram(req, res) {
       [normalizedPhone, chatId, username],
     );
     if (inserted.rows.length > 0) {
+      recordSubscriber(chatId, username);
       return res.json({ success: true, message: 'Telegram chat ID linked successfully' });
     }
 
@@ -72,6 +74,7 @@ async function linkTelegram(req, res) {
 
     // Same Telegram account linking again → just refresh the username.
     if (rows.length > 0 && String(rows[0].chat_id) === chatId) {
+      recordSubscriber(chatId, username);
       await pool.query(
         'UPDATE telegram_chat_ids SET username = $2, updated_at = NOW() WHERE phone = $1',
         [normalizedPhone, username],
