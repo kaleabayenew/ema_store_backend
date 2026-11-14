@@ -46,6 +46,12 @@ async function getUserCart(userId) {
 // ── Add Item to Cart ─────────────────────────────────────────────────────
 
 async function addToCart(userId, productId, quantity = 1) {
+  // Positive whole-number quantities only — negative values would corrupt
+  // order totals downstream.
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    throw new AppError('Quantity must be a whole number between 1 and 99.', 400, 'INVALID_QUANTITY');
+  }
+
   // Check if product exists and has stock
   const { rows: productRows } = await pool.query(
     'SELECT id, stock, price_cents FROM products WHERE id = $1',
@@ -91,6 +97,9 @@ async function addToCart(userId, productId, quantity = 1) {
 // ── Update Cart Item Quantity ─────────────────────────────────────────────
 
 async function updateCartItem(userId, cartItemId, quantity) {
+  if (!Number.isInteger(quantity) || quantity > 99) {
+    throw new AppError('Quantity must be a whole number between 1 and 99.', 400, 'INVALID_QUANTITY');
+  }
   if (quantity <= 0) {
     await pool.query(
       'DELETE FROM cart_items WHERE id = $1 AND user_id = $2',

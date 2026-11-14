@@ -87,9 +87,9 @@ async function coinSettings(req, res, next) {
 
 async function updateCoinSettings(req, res, next) {
   try {
-    const { coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled } = req.body || {};
+    const { coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled, coinProductIds } = req.body || {};
     const data = await svc.updateCoinSettings({
-      coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled,
+      coinsPerUnit, conversionEnabled, inviteGiftEnabled, inviteGiftCoins, coinBuyEnabled, coinProductIds,
     });
     ok(res, data);
   } catch (err) {

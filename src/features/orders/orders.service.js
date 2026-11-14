@@ -8,7 +8,20 @@ const { AppError } = require('../../core/errors/app_error');
 
 // ── Create Order from Cart or Direct Items ─────────────────────────────────
 
-async function createOrder(userId, shippingAddress, paymentMethod, directItems = null) {
+async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null } = {}) {
+  // Idempotent replay: a retried checkout (e.g. after a client timeout)
+  // returns the original order instead of charging/creating twice.
+  if (idempotencyKey) {
+    const { rows: dup } = await pool.query(
+      `SELECT * FROM orders WHERE idempotency_key = $1 AND user_id = $2`,
+      [idempotencyKey, userId],
+    );
+    if (dup.length > 0) {
+      // Same raw-row shape as the normal RETURNING * path below.
+      return { ...dup[0], duplicate: true };
+    }
+  }
+
   // coin_price may be missing if startup migration failed — add lazily so
   // order queries never break.
   try {
@@ -28,6 +41,12 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       itemsToOrder = [];
       for (const item of directItems) {
         const { productId, quantity } = item;
+
+        // Quantity must be a positive integer — a negative value would
+        // invert the total and mint balance/coins on wallet payments.
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+          throw new AppError('Quantity must be a whole number between 1 and 99.', 400, 'INVALID_QUANTITY');
+        }
 
         // Query product details
         const { rows: productRows } = await client.query(`
@@ -69,8 +88,12 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
         throw new AppError('Cart is empty', 400, 'EMPTY_CART');
       }
 
-      // Check stock for cart items
+      // Check stock for cart items (also guards against bad rows written
+      // before quantity validation existed).
       for (const item of cartItems) {
+        if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 99) {
+          throw new AppError('Invalid quantity in cart. Please update your cart.', 400, 'INVALID_QUANTITY');
+        }
         if (item.stock < item.quantity) {
           throw new AppError(`Insufficient stock for product`, 400, 'INSUFFICIENT_STOCK');
         }
@@ -133,10 +156,10 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // Create order (wallet-paid orders start as PAID)
     const orderStatus = walletPayment ? 'PAID' : 'PENDING';
     const { rows: orderRows } = await client.query(`
-      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null]);
 
     const order = orderRows[0];
 
@@ -149,11 +172,16 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
         VALUES ($1, $2, $3, $4)
       `, [order.id, item.product_id, item.quantity, priceCents]);
 
-      await client.query(`
+      // Atomic stock decrement — the WHERE guard prevents overselling when
+      // two orders race for the last unit (the earlier SELECT is not locked).
+      const { rowCount: stockUpdated } = await client.query(`
         UPDATE products
         SET stock = stock - $1, sold_count = sold_count + $1
-        WHERE id = $2
+        WHERE id = $2 AND stock >= $1
       `, [item.quantity, item.product_id]);
+      if (stockUpdated === 0) {
+        throw new AppError('Insufficient stock for one or more items', 400, 'INSUFFICIENT_STOCK');
+      }
     }
 
     // Clear cart only if we used cart items
@@ -201,6 +229,14 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     return order;
   } catch (err) {
     await client.query('ROLLBACK');
+    // Unique-violation on idempotency_key = a concurrent retry won the race.
+    if (idempotencyKey && err && err.code === '23505') {
+      const { rows: dup } = await pool.query(
+        `SELECT * FROM orders WHERE idempotency_key = $1 AND user_id = $2`,
+        [idempotencyKey, userId],
+      );
+      if (dup.length > 0) return { ...dup[0], duplicate: true };
+    }
     throw err;
   } finally {
     client.release();
@@ -339,19 +375,70 @@ async function getAllOrders({ page = 1, limit = 20, status, search } = {}) {
 
 // ── Update Order Status (Admin) ──────────────────────────────────────────
 
-async function updateOrderStatus(orderId, status) {
-  const { rows } = await pool.query(`
-    UPDATE orders
-    SET status = $1, updated_at = NOW()
-    WHERE id = $2
-    RETURNING *
-  `, [status, orderId]);
+const ORDER_STATUSES = new Set([
+  'PENDING', 'PENDING_PAYMENT', 'PAID', 'PLACED', 'CONFIRMED', 'PROCESSING',
+  'PACKED', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CANCELLED', 'REFUNDED',
+]);
 
-  if (rows.length === 0) {
-    throw new AppError('Order not found', 404, 'NOT_FOUND');
+// Mirrors the admin panel's transition rules — terminal states are final.
+const ALLOWED_TRANSITIONS = {
+  PENDING:          ['CONFIRMED', 'CANCELLED'],
+  PENDING_PAYMENT:  ['PAID', 'CANCELLED'],
+  PAID:             ['CONFIRMED', 'PROCESSING', 'CANCELLED'],
+  PLACED:           ['CONFIRMED', 'CANCELLED'],
+  CONFIRMED:        ['PROCESSING', 'PACKED', 'CANCELLED'],
+  PROCESSING:       ['PACKED', 'CANCELLED'],
+  PACKED:           ['SHIPPED', 'CANCELLED'],
+  SHIPPED:          ['IN_TRANSIT', 'DELIVERED'],
+  IN_TRANSIT:       ['DELIVERED'],
+  DELIVERED:        [],
+  CANCELLED:        [],
+  REFUNDED:         [],
+};
+
+async function updateOrderStatus(orderId, status) {
+  const next = String(status || '').toUpperCase();
+  if (!ORDER_STATUSES.has(next)) {
+    throw new AppError('Invalid order status.', 400, 'INVALID_STATUS');
   }
 
-  return rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: current } = await client.query(
+      `SELECT status FROM orders WHERE id = $1 FOR UPDATE`,
+      [orderId],
+    );
+    if (current.length === 0) {
+      throw new AppError('Order not found', 404, 'NOT_FOUND');
+    }
+
+    const prev = String(current[0].status || '').toUpperCase();
+    const allowed = ALLOWED_TRANSITIONS[prev];
+    if (allowed && !allowed.includes(next)) {
+      throw new AppError(
+        `Cannot move order from ${prev} to ${next}.`,
+        400,
+        'INVALID_STATUS_TRANSITION',
+      );
+    }
+
+    const { rows } = await client.query(`
+      UPDATE orders
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+    `, [next, orderId]);
+
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Get Order by ID ───────────────────────────────────────────────────────

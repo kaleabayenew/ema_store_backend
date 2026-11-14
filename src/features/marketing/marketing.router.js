@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { authenticate } = require('../../core/middleware/auth');
+const { authenticate, requireStaff } = require('../../core/middleware/auth');
 const ctrl = require('./marketing.controller');
 
 const router = Router();
@@ -13,7 +13,7 @@ router.post('/coupons/claim', authenticate, ctrl.claimCouponByCode);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 
-router.get('/admin/wheel-config', authenticate, ctrl.getAdminWheel);
-router.put('/admin/wheel-config', authenticate, ctrl.updateAdminWheel);
+router.get('/admin/wheel-config', authenticate, requireStaff, ctrl.getAdminWheel);
+router.put('/admin/wheel-config', authenticate, requireStaff, ctrl.updateAdminWheel);
 
 module.exports = router;

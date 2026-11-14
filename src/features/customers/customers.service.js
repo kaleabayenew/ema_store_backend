@@ -30,23 +30,8 @@ function normalizePhone(phone) {
 }
 
 /**
- * Get the current readable password for a customer.
- */
-async function getCustomerPassword(id) {
-  const { rows } = await pool.query(
-    `SELECT password_plain, phone FROM users WHERE id = $1 AND role = 'CUSTOMER'`,
-    [id]
-  );
-  if (rows.length === 0) return null;
-  return {
-    password: rows[0].password_plain || null,
-    phone: rows[0].phone,
-  };
-}
-
-/**
- * Generate a new password for a customer, persist it (hash + plain),
- * and send it to the customer via Telegram.
+ * Generate a new password for a customer, persist the hash only
+ * (no plaintext is ever stored), and send it to the customer via Telegram.
  */
 async function resetCustomerPassword(id) {
   const { rows } = await pool.query(
@@ -62,9 +47,9 @@ async function resetCustomerPassword(id) {
 
   await pool.query(
     `UPDATE users
-       SET password_hash = $1, password_plain = $2, updated_at = NOW()
-     WHERE id = $3`,
-    [passwordHash, newPassword, id]
+       SET password_hash = $1, password_plain = NULL, updated_at = NOW()
+     WHERE id = $2`,
+    [passwordHash, id]
   );
 
   // Try to send via Telegram if the customer linked their account
@@ -365,7 +350,6 @@ module.exports = {
   listCustomers,
   getCustomer,
   getCustomerOrders,
-  getCustomerPassword,
   resetCustomerPassword,
   setCustomerBlock,
   getCustomerProfile,

@@ -1,6 +1,6 @@
-﻿const { Router } = require('express');
+const { Router } = require('express');
 const ctrl = require('./notifications.controller');
-const { requireAuth } = require('../../core/middleware/auth');
+const { requireAuth, requireStaff, adminOnly } = require('../../core/middleware/auth');
 
 const router = Router();
 
@@ -14,8 +14,8 @@ router.patch('/read-all', requireAuth, ctrl.markAllAsRead);
 router.delete('/:id', requireAuth, ctrl.deleteNotification);
 
 // ── Admin: Send Announcements ───────────────────────────────────────────────
-router.post('/announce', requireAuth, ctrl.sendAnnouncement);
+router.post('/announce', requireAuth, adminOnly, ctrl.sendAnnouncement);
 // ── Admin: Get all notifications ────────────────────────────────────────────
-router.get('/admin/all', requireAuth, ctrl.getAllNotifications);
+router.get('/admin/all', requireAuth, requireStaff, ctrl.getAllNotifications);
 
 module.exports = router;

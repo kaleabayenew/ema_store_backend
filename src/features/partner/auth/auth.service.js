@@ -81,11 +81,11 @@ async function login(phone) {
     `SELECT id FROM users WHERE phone = $1 AND role = 'PARTNER'`,
     [normalizedPhone],
   );
-  if (rows.length === 0) {
-    throw new AppError('Partner account not found.', 404, 'USER_NOT_FOUND');
+  // Do not reveal whether the account exists — return the same response
+  // either way and simply skip sending an OTP for unknown numbers.
+  if (rows.length > 0) {
+    await sendOtp(normalizedPhone, 'PARTNER_LOGIN');
   }
-
-  await sendOtp(normalizedPhone, 'PARTNER_LOGIN');
   return { message: 'OTP sent.' };
 }
 

@@ -59,7 +59,7 @@ const getAllPartners = async (req, res, next) => {
         pp.city as sub_city,
         pp.rating_avg as rating,
         pp.rating_count,
-        pp.total_orders as products,
+        (SELECT COUNT(*)::int FROM products pr WHERE pr.partner_id = pp.user_id) as product_count,
         pp.total_sales as revenue,
         pp.is_verified,
         pp.is_active,
@@ -83,7 +83,7 @@ const getAllPartners = async (req, res, next) => {
       shop: p.shop,
       owner: p.owner,
       subCity: p.sub_city ?? '—',
-      products: p.products || 0,
+      products: p.product_count ?? 0,
       revenue: p.revenue ? `ETB ${(Number(p.revenue) / 100).toLocaleString('en-ET')}` : 'ETB 0',
       rating: Number(p.rating) || 0,
       reviewCount: p.rating_count || 0,
@@ -127,6 +127,23 @@ const getPartnerById = async (req, res, next) => {
     );
     if (rows.length === 0) return next(new AppError('Partner not found', 404, 'NOT_FOUND'));
     const p = rows[0];
+
+    // products.partner_id references the partner's user id (pp.user_id)
+    const prodRes = await pool.query(
+      `SELECT * FROM products WHERE partner_id = $1 ORDER BY created_at DESC LIMIT 100`,
+      [p.user_id],
+    );
+    const productList = prodRes.rows.map((pr) => ({
+      id: pr.id,
+      name: pr.name_en || pr.name || '—',
+      price: pr.price_cents != null ? Number(pr.price_cents) / 100 : Number(pr.price ?? 0),
+      stock: Number(pr.stock ?? pr.stock_quantity) || 0,
+      status: pr.status || (pr.is_active === false ? 'INACTIVE' : 'ACTIVE'),
+      visible: pr.is_visible !== false && pr.is_active !== false,
+      imageUrl: pr.primary_image_url || pr.image_url || null,
+      createdAt: pr.created_at,
+    }));
+
     ok(res, {
       partner: {
         id: p.id,
@@ -141,7 +158,8 @@ const getPartnerById = async (req, res, next) => {
         logoUrl: p.logo_url,
         rating: Number(p.rating_avg) || 0,
         reviewCount: p.rating_count || 0,
-        products: p.total_orders || 0,
+        products: productList.length,
+        productList,
         revenue: p.total_sales ? `ETB ${(Number(p.total_sales) / 100).toLocaleString('en-ET')}` : 'ETB 0',
         status: p.is_verified ? 'APPROVED' : (p.is_active === false ? 'SUSPENDED' : 'PENDING'),
         createdAt: p.created_at,

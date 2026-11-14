@@ -55,6 +55,13 @@ function ensureBidSchema() {
       await pool.query(
         `ALTER TABLE bid_entries ADD COLUMN IF NOT EXISTS placed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
       );
+      await pool.query(
+        `ALTER TABLE bid_entries ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(128)`,
+      );
+      await pool.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_bid_entries_idem
+           ON bid_entries(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+      );
       const { rows } = await pool.query(
         `SELECT 1 FROM information_schema.columns
           WHERE table_name = 'bid_entries' AND column_name = 'bid_time'`,
@@ -629,9 +636,30 @@ async function deleteBid(id) {
 // other out when the winner is picked: lowest UNIQUE bid wins). The auction
 // row is locked so entries are serialized.
 
-async function placeBidEntry(bidId, userId, amountInput) {
+async function placeBidEntry(bidId, userId, amountInput, idempotencyKey = null) {
   await ensureBidSchema();
   if (!UUID_RE.test(String(bidId))) throw new AppError('Auction not found', 404, 'NOT_FOUND');
+
+  // Idempotent replay: a retried request (e.g. after a client timeout) returns
+  // the original entry instead of charging the wallet twice.
+  if (idempotencyKey) {
+    const { rows: dup } = await pool.query(
+      `SELECT be.id, be.bid_id, be.user_id, be.amount, be.placed_at, u.balance
+         FROM bid_entries be JOIN users u ON u.id = be.user_id
+        WHERE be.idempotency_key = $1`,
+      [idempotencyKey],
+    );
+    if (dup.length > 0) {
+      const d = dup[0];
+      return {
+        ...d,
+        amount: parseFloat(d.amount),
+        charged: parseFloat(d.amount),
+        wallet_balance: parseFloat(d.balance) || 0,
+        duplicate: true,
+      };
+    }
+  }
 
   // The controller already converts cents → ETB, so the value is in Birr here.
   const raw = Number(amountInput);
@@ -708,10 +736,10 @@ async function placeBidEntry(bidId, userId, amountInput) {
     });
 
     const { rows: entry } = await client.query(
-      `INSERT INTO bid_entries (bid_id, user_id, amount, placed_at)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO bid_entries (bid_id, user_id, amount, placed_at, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, bid_id, user_id, amount, placed_at`,
-      [bidId, userId, amount, new Date(nowMs)],
+      [bidId, userId, amount, new Date(nowMs), idempotencyKey || null],
     );
 
     await client.query('COMMIT');
@@ -723,6 +751,25 @@ async function placeBidEntry(bidId, userId, amountInput) {
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    // Unique-violation on idempotency_key = a concurrent retry won the race.
+    if (idempotencyKey && err && err.code === '23505') {
+      const { rows: dup } = await pool.query(
+        `SELECT be.id, be.bid_id, be.user_id, be.amount, be.placed_at, u.balance
+           FROM bid_entries be JOIN users u ON u.id = be.user_id
+          WHERE be.idempotency_key = $1`,
+        [idempotencyKey],
+      );
+      if (dup.length > 0) {
+        const d = dup[0];
+        return {
+          ...d,
+          amount: parseFloat(d.amount),
+          charged: parseFloat(d.amount),
+          wallet_balance: parseFloat(d.balance) || 0,
+          duplicate: true,
+        };
+      }
+    }
     throw err;
   } finally {
     client.release();

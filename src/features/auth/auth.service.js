@@ -718,9 +718,12 @@ async function getCurrentUser(userId) {
             u.block_reason,
             u.is_active,
             u.referral_code,
-            cp.full_name
+            cp.full_name,
+            au.admin_role,
+            au.allowed_pages
      FROM users u
      LEFT JOIN customer_user cp ON cp.user_id = u.id
+     LEFT JOIN admin_user au ON au.user_id = u.id
      WHERE u.id = $1`,
     [userId],
   );
@@ -748,6 +751,8 @@ async function getCurrentUser(userId) {
     coins: u.coins || 0,
     referralCode: u.referral_code || '',
     profileImage: u.profile_image || null,
+    adminRole: u.admin_role || null,
+    allowedPages: u.admin_role ? u.allowed_pages || [] : [],
     isBlocked: !!u.is_blocked,
     isActive: u.is_active,
     blockReason: u.block_reason || null,

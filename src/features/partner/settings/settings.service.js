@@ -64,6 +64,9 @@ async function registerFcmToken(userId, token) {
      RETURNING *`,
     [userId, token],
   );
+  // Keep users.fcm_token in sync so broadcast/push services
+  // (announcements, notifications.service) reach this device too.
+  await pool.query(`UPDATE users SET fcm_token = $2 WHERE id = $1`, [userId, token]);
   return rows[0];
 }
 

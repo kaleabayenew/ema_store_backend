@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const ctrl = require('./about.controller');
-const { requireAuth } = require('../../core/middleware/auth');
+const { requireStaff } = require('../../core/middleware/auth');
 
 const router = Router();
 
@@ -8,9 +8,9 @@ const router = Router();
 router.get('/', ctrl.getAboutContent);
 
 // Admin endpoints (require auth)
-router.post('/', requireAuth, ctrl.createAboutContent);
-router.get('/all', requireAuth, ctrl.getAllAboutContent);
-router.patch('/:id', requireAuth, ctrl.updateAboutContent);
-router.delete('/:id', requireAuth, ctrl.deleteAboutContent);
+router.post('/', requireStaff, ctrl.createAboutContent);
+router.get('/all', requireStaff, ctrl.getAllAboutContent);
+router.patch('/:id', requireStaff, ctrl.updateAboutContent);
+router.delete('/:id', requireStaff, ctrl.deleteAboutContent);
 
 module.exports = router;

@@ -274,6 +274,12 @@ async function adjustBalance({ userId, direction, amount, note, adminId }) {
     const { AppError } = require('../../core/errors/app_error');
     throw new AppError('Direction must be deposit or withdraw.', 400, 'INVALID_DIRECTION');
   }
+  // Hard cap per adjustment — larger corrections must go through a reviewed
+  // finance process, not a single API call.
+  if (value > 100000) {
+    const { AppError } = require('../../core/errors/app_error');
+    throw new AppError('Single adjustment cannot exceed ETB 100,000.', 400, 'AMOUNT_TOO_LARGE');
+  }
 
   const client = await pool.connect();
   try {
@@ -361,6 +367,7 @@ const COIN_SETTINGS_DEFAULTS = {
   inviteGiftEnabled: true,
   inviteGiftCoins: 50,
   coinBuyEnabled: false,
+  coinProductIds: [],
 };
 
 // The startup migration can fail on cold DB connections, leaving the table
@@ -381,6 +388,7 @@ async function ensureCoinSettingsTable() {
   await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS invite_gift_enabled BOOLEAN NOT NULL DEFAULT true`);
   await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS invite_gift_coins INTEGER NOT NULL DEFAULT 50`);
   await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS coin_buy_enabled BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`ALTER TABLE coin_settings ADD COLUMN IF NOT EXISTS coin_product_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await pool.query(`INSERT INTO coin_settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING`);
 }
 
@@ -388,7 +396,7 @@ async function getCoinSettings() {
   try {
     const { rows } = await pool.query(
       `SELECT coins_per_unit, conversion_enabled, invite_gift_enabled,
-              invite_gift_coins, coin_buy_enabled, updated_at
+              invite_gift_coins, coin_buy_enabled, coin_product_ids, updated_at
          FROM coin_settings WHERE id = 'default'`,
     );
     const r = rows[0];
@@ -399,6 +407,7 @@ async function getCoinSettings() {
       inviteGiftEnabled: r.invite_gift_enabled !== false,
       inviteGiftCoins: parseInt(r.invite_gift_coins, 10) || COIN_SETTINGS_DEFAULTS.inviteGiftCoins,
       coinBuyEnabled: r.coin_buy_enabled === true,
+      coinProductIds: Array.isArray(r.coin_product_ids) ? r.coin_product_ids.map(String) : [],
       updatedAt: r.updated_at ?? null,
     };
   } catch {
@@ -413,6 +422,7 @@ async function updateCoinSettings({
   inviteGiftEnabled,
   inviteGiftCoins,
   coinBuyEnabled,
+  coinProductIds,
 } = {}) {
   const rate = coinsPerUnit !== undefined ? parseFloat(coinsPerUnit) : null;
   if (rate !== null && (!Number.isFinite(rate) || rate <= 0)) {
@@ -426,31 +436,38 @@ async function updateCoinSettings({
     err.status = 400;
     throw err;
   }
+  const productIds = Array.isArray(coinProductIds)
+    ? coinProductIds.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 100).slice(0, 500)
+    : null;
   await ensureCoinSettingsTable();
   const { rows } = await pool.query(
     `INSERT INTO coin_settings (id, coins_per_unit, conversion_enabled,
-        invite_gift_enabled, invite_gift_coins, coin_buy_enabled, updated_at)
+        invite_gift_enabled, invite_gift_coins, coin_buy_enabled,
+        coin_product_ids, updated_at)
      VALUES ('default',
         COALESCE($1, ${COIN_SETTINGS_DEFAULTS.coinsPerUnit}),
         COALESCE($2, ${COIN_SETTINGS_DEFAULTS.conversionEnabled}),
         COALESCE($3, ${COIN_SETTINGS_DEFAULTS.inviteGiftEnabled}),
         COALESCE($4, ${COIN_SETTINGS_DEFAULTS.inviteGiftCoins}),
-        COALESCE($5, ${COIN_SETTINGS_DEFAULTS.coinBuyEnabled}), NOW())
+        COALESCE($5, ${COIN_SETTINGS_DEFAULTS.coinBuyEnabled}),
+        COALESCE($6::jsonb, '[]'::jsonb), NOW())
      ON CONFLICT (id) DO UPDATE SET
        coins_per_unit = COALESCE($1, coin_settings.coins_per_unit),
        conversion_enabled = COALESCE($2, coin_settings.conversion_enabled),
        invite_gift_enabled = COALESCE($3, coin_settings.invite_gift_enabled),
        invite_gift_coins = COALESCE($4, coin_settings.invite_gift_coins),
        coin_buy_enabled = COALESCE($5, coin_settings.coin_buy_enabled),
+       coin_product_ids = COALESCE($6::jsonb, coin_settings.coin_product_ids),
        updated_at = NOW()
      RETURNING coins_per_unit, conversion_enabled, invite_gift_enabled,
-               invite_gift_coins, coin_buy_enabled, updated_at`,
+               invite_gift_coins, coin_buy_enabled, coin_product_ids, updated_at`,
     [
       rate,
       conversionEnabled !== undefined ? !!conversionEnabled : null,
       inviteGiftEnabled !== undefined ? !!inviteGiftEnabled : null,
       giftCoins,
       coinBuyEnabled !== undefined ? !!coinBuyEnabled : null,
+      productIds === null ? null : JSON.stringify(productIds),
     ],
   );
   const r = rows[0];
@@ -460,6 +477,7 @@ async function updateCoinSettings({
     inviteGiftEnabled: r.invite_gift_enabled !== false,
     inviteGiftCoins: parseInt(r.invite_gift_coins, 10),
     coinBuyEnabled: r.coin_buy_enabled === true,
+    coinProductIds: Array.isArray(r.coin_product_ids) ? r.coin_product_ids.map(String) : [],
     updatedAt: r.updated_at,
   };
 }

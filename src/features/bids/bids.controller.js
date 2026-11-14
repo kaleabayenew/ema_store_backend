@@ -90,11 +90,18 @@ async function placeEntry(req, res, next) {
       ? Number(req.body.bid_amount_cents) / 100
       : (req.body.bidAmountCents != null
         ? Number(req.body.bidAmountCents) / 100
-        : (req.body.amount != null ? Number(req.body.amount) : null));
+        : (req.body.amountCents != null
+          ? Number(req.body.amountCents) / 100
+          : (req.body.amount != null ? Number(req.body.amount) : null)));
     if (amount == null || isNaN(amount)) {
       return res.status(400).json({ success: false, message: 'Bid amount is required' });
     }
-    const entry = await placeBidEntry(req.params.id, userId, amount);
+    const entry = await placeBidEntry(
+      req.params.id,
+      userId,
+      amount,
+      req.get('Idempotency-Key') || req.body.idempotency_key || null,
+    );
     ok(res, {
       entry,
       wallet_balance: entry.wallet_balance,

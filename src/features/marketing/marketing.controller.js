@@ -40,10 +40,14 @@ async function getMyCoupons(req, res, next) {
 async function claimCouponByCode(req, res, next) {
   try {
     const { code } = req.body;
-    if (!code?.trim()) {
+    const trimmed = String(code || '').trim();
+    if (!trimmed) {
       return res.status(400).json({ success: false, message: 'Coupon code is required' });
     }
-    const coupon = await claimCoupon(req.user.id, code.trim());
+    if (trimmed.length > 50 || !/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+      return res.status(400).json({ success: false, message: 'Invalid coupon code format' });
+    }
+    const coupon = await claimCoupon(req.user.id, trimmed);
     res.status(201).json({ success: true, coupon });
   } catch (e) { next(e); }
 }

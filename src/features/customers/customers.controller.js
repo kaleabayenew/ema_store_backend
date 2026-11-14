@@ -2,7 +2,6 @@ const {
   listCustomers,
   getCustomer,
   getCustomerOrders,
-  getCustomerPassword,
   resetCustomerPassword,
   setCustomerBlock,
   getCustomerProfile,
@@ -46,24 +45,13 @@ async function getOrdersByCustomer(req, res, next) {
 
 async function getPassword(req, res, next) {
   try {
-    // PIN gate — only reveal the plain password to authorized admins
-    const pin = (req.query.pin || (req.body && req.body.pin)) || '';
-    const expectedPin = process.env.PASSWORD_REVEAL_PIN || '1234';
-    if (String(pin) !== String(expectedPin)) {
-      return res.status(403).json({ success: false, message: 'Incorrect PIN' });
-    }
-
-    const result = await getCustomerPassword(req.params.id);
-    if (!result) return next(new AppError('Customer not found', 404, 'NOT_FOUND'));
-
-    // hashed = true when we only have the bcrypt hash (cannot be revealed)
-    res.json({
-      success: true,
-      data: {
-        password: result.password,
-        hashed: !result.password, // no plain password on record → only hash exists
-        phone: result.phone,
-      },
+    // Plain-text passwords are no longer stored or revealed. Password
+    // resets go through POST /:id/reset-password which delivers the new
+    // password to the customer via Telegram.
+    res.status(410).json({
+      success: false,
+      message: 'Password reveal is disabled. Use reset-password instead.',
+      code: 'PASSWORD_REVEAL_DISABLED',
     });
   } catch (err) {
     next(err);
@@ -106,7 +94,24 @@ async function getProfile(req, res, next) {
 async function updateProfile(req, res, next) {
   try {
     const { fullName, avatarUrl, email } = req.body;
-    const customer = await updateCustomerProfile(req.user.id, { fullName, avatarUrl, email });
+
+    if (fullName !== undefined) {
+      const name = String(fullName || '').trim();
+      if (name.length < 2 || name.length > 100) {
+        return res.status(400).json({ success: false, message: 'Name must be 2–100 characters' });
+      }
+      req.body.fullName = name;
+    }
+    if (email !== undefined && email !== null && email !== '') {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email))) {
+        return res.status(400).json({ success: false, message: 'Invalid email address' });
+      }
+    }
+    if (avatarUrl !== undefined && avatarUrl !== null && String(avatarUrl).length > 500) {
+      return res.status(400).json({ success: false, message: 'Invalid avatar URL' });
+    }
+
+    const customer = await updateCustomerProfile(req.user.id, { fullName: req.body.fullName, avatarUrl, email });
     res.json({ success: true, customer });
   } catch (err) {
     next(err);

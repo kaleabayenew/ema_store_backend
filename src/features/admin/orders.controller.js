@@ -135,6 +135,8 @@ async function getOrderById(req, res, next) {
         totalAmount:     parseFloat(o.total_amount) || 0,
         shippingAddress: o.shipping_address ?? '—',
         paymentMethod:   o.payment_method ?? '—',
+        deliveryMethod:  o.delivery_method ?? null,
+        paymentId:       o.payment_id ?? null,
         customerName:    o.customer_name ?? 'Unknown',
         customerPhone:   o.customer_phone ?? '',
         customerEmail:   o.customer_email ?? '',

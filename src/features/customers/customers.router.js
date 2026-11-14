@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { authenticate } = require('../../core/middleware/auth');
+const { authenticate, requireStaff } = require('../../core/middleware/auth');
 const {
   getCustomers,
   getCustomerById,
@@ -17,11 +17,12 @@ const router = Router();
 router.get('/me',                 authenticate, getProfile);
 router.patch('/me',               authenticate, updateProfile);
 
-router.get('/',                 authenticate, getCustomers);
-router.get('/:id',              authenticate, getCustomerById);
-router.get('/:id/orders',       authenticate, getOrdersByCustomer);
-router.get('/:id/password',     authenticate, getPassword);
-router.post('/:id/reset-password', authenticate, resetPassword);
-router.patch('/:id/block',      authenticate, blockCustomer);
+// Customer administration is staff-only — never expose to end users.
+router.get('/',                 requireStaff, getCustomers);
+router.get('/:id',              requireStaff, getCustomerById);
+router.get('/:id/orders',       requireStaff, getOrdersByCustomer);
+router.get('/:id/password',     requireStaff, getPassword);
+router.post('/:id/reset-password', requireStaff, resetPassword);
+router.patch('/:id/block',      requireStaff, blockCustomer);
 
 module.exports = router;

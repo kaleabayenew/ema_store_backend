@@ -22,6 +22,7 @@ router.post('/login', loginIpLimiter, loginLimiter, ctrl.login);
 
 // Forgot password
 router.post('/forgot-password',       otpSendIpLimiter, otpSendLimiter, ctrl.forgotPassword);
+router.post('/forgot-password/verify', otpVerifyLimiter, ctrl.verifyForgotPassword);
 router.post('/forgot-password/reset', otpVerifyLimiter, ctrl.resetPassword);
 
 // Resend OTP

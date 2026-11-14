@@ -1,7 +1,7 @@
 const service = require('./auth.service');
 const tokenService = require('./token.service');
 const { ok, created, error } = require('../../core/utils/response');
-const { storageEndpoint } = require('../../core/config');
+const { storageEndpoint, isProduction, refreshTokenDays } = require('../../core/config');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -15,6 +15,36 @@ const noStore = (res) => {
 
 const invalidInput = (res) =>
   error(res, 'Invalid input.', 400, 'INVALID_INPUT');
+
+// ── HttpOnly session cookie ──────────────────────────────────────────────────
+// Holds the REFRESH token only (never the access token). Scoped to the auth
+// routes so it is only sent to /auth/* endpoints. Browsers can't read it, so
+// XSS cannot steal it; rotation on every /auth/refresh limits replay.
+const SESSION_COOKIE = 'ema_rt';
+const SESSION_COOKIE_PATH = '/api/v1/auth';
+const sessionCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,               // Secure required for SameSite=None
+  sameSite: isProduction ? 'none' : 'lax',
+  path: SESSION_COOKIE_PATH,
+  maxAge: refreshTokenDays * 24 * 60 * 60 * 1000,
+};
+
+const setSessionCookie = (res, refreshToken) => {
+  if (typeof refreshToken === 'string' && refreshToken) {
+    res.cookie(SESSION_COOKIE, refreshToken, sessionCookieOptions);
+  }
+};
+
+const clearSessionCookie = (res) => {
+  res.clearCookie(SESSION_COOKIE, { ...sessionCookieOptions, maxAge: undefined });
+};
+
+/** Refresh token from body (mobile app) or the HttpOnly cookie (web admin). */
+const refreshTokenFrom = (req) =>
+  isRefreshToken(req.body?.refreshToken)
+    ? req.body.refreshToken
+    : (typeof req.cookies?.[SESSION_COOKIE] === 'string' ? req.cookies[SESSION_COOKIE] : null);
 
 const OTP_TYPES = ['REGISTRATION', 'PASSWORD_RESET'];
 
@@ -118,6 +148,7 @@ const registerVerify = async (req, res, next) => {
       { req },
     );
 
+    setSessionCookie(res, result.refreshToken);
     created(res, result);
   } catch (err) {
     next(err);
@@ -150,6 +181,7 @@ const login = async (req, res, next) => {
       { req },
     );
 
+    setSessionCookie(res, result.refreshToken);
     ok(res, result);
   } catch (err) {
     // Log only the error code — never phone, email or password.
@@ -171,6 +203,25 @@ const forgotPassword = async (req, res, next) => {
     await service.forgotPasswordStep1({ phone }, { req });
 
     ok(res, { message: 'If this number is registered, a reset code has been sent.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── POST /api/v1/auth/forgot-password/verify ──────────────────────────────
+// Body: { phone, code }
+// → Checks the reset OTP WITHOUT consuming it (the reset call consumes it).
+const verifyForgotPassword = async (req, res, next) => {
+  try {
+    noStore(res);
+    const phone = str(req.body.phone);
+    const code = str(String(req.body.code ?? ''));
+
+    if (!isPhone(phone) || !isOtpCode(code)) return invalidInput(res);
+
+    await service.verifyOtp(phone, code, 'PASSWORD_RESET', { consume: false });
+
+    ok(res, { verified: true });
   } catch (err) {
     next(err);
   }
@@ -224,11 +275,12 @@ const resendOtp = async (req, res, next) => {
 const refresh = async (req, res, next) => {
   try {
     noStore(res);
-    const refreshToken = req.body.refreshToken;
+    const refreshToken = refreshTokenFrom(req);
 
-    if (!isRefreshToken(refreshToken)) return invalidInput(res);
+    if (!refreshToken) return invalidInput(res);
 
     const tokens = await tokenService.rotateRefreshToken(refreshToken, req);
+    setSessionCookie(res, tokens.refreshToken);
     ok(res, {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
@@ -244,10 +296,11 @@ const refresh = async (req, res, next) => {
 const logout = async (req, res, next) => {
   try {
     noStore(res);
-    const refreshToken = req.body.refreshToken;
-    if (isRefreshToken(refreshToken)) {
+    const refreshToken = refreshTokenFrom(req);
+    if (refreshToken) {
       await tokenService.revokeRefreshToken(refreshToken);
     }
+    clearSessionCookie(res);
     ok(res, { message: 'Logged out.' });
   } catch (err) {
     next(err);
@@ -264,6 +317,7 @@ const logoutAll = async (req, res, next) => {
       return error(res, 'Authentication required.', 401, 'UNAUTHORIZED');
 
     await tokenService.revokeAllForUser(userId);
+    clearSessionCookie(res);
     ok(res, { message: 'All sessions revoked.' });
   } catch (err) {
     next(err);
@@ -311,6 +365,7 @@ module.exports = {
   registerVerify,
   login,
   forgotPassword,
+  verifyForgotPassword,
   resetPassword,
   resendOtp,
   refresh,
