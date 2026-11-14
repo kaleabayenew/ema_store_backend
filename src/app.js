@@ -1077,6 +1077,8 @@ async function autoMigrate() {
           rejected_at    TIMESTAMPTZ
         )
       `);
+      await pool.query(`ALTER TABLE app_pending_releases ADD COLUMN IF NOT EXISTS apk_path TEXT`);
+      await pool.query(`ALTER TABLE app_pending_releases ADD COLUMN IF NOT EXISTS telegram_file_id TEXT`);
       console.log('[Migration] ✓ App version config table');
     } catch (e) {
       console.log('[Migration] ⚠ App version config table:', e.message);

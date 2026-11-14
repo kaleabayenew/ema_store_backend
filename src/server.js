@@ -3,6 +3,7 @@ const { port } = require('./core/config');
 const { checkDatabaseConnection, pool } = require('./core/config/database');
 const TelegramBot = require('node-telegram-bot-api');
 const { registerAppUpdateBotHandlers } = require('./features/app-update/app-update-bot.handler');
+const { recordSubscriber } = require('./features/app-update/app-update.service');
 
 // Store pending phone number requests (chatId -> timestamp)
 const pendingPhoneRequests = new Map();
@@ -80,9 +81,17 @@ async function startServer() {
 					return response.json();
 				};
 
+				// Track every user who messages the bot as a subscriber for update announcements
+				bot.on('message', (msg) => {
+					if (msg.chat && msg.chat.id) {
+						recordSubscriber(msg.chat.id, msg.from?.username);
+					}
+				});
+
 				// Handle /start command — the ONLY way to link is the contact button
 				bot.onText(/\/start/, async (msg) => {
 					const chatId = msg.chat.id;
+					recordSubscriber(chatId, msg.from?.username);
 
 					// Already linked? Tell the user instead of showing the button.
 					try {
