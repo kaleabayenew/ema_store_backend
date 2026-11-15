@@ -893,6 +893,10 @@ async function autoMigrate() {
         UNIQUE(user_id, product_id)
       );
     `);
+    // Seasonal-promotion context on cart/order rows (nullable — normal
+    // purchases keep working with no promotion attached).
+    await pool.query(`ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS promotion_id UUID`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS promotion_id UUID`);
 
     // Create payment_methods table
     await pool.query(`
@@ -1084,6 +1088,38 @@ async function autoMigrate() {
       console.log('[Migration] ⚠ App version config table:', e.message);
     }
 
+    // Seasonal promotions — admin-created campaigns shown in the customer app
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS seasonal_promotions (
+          id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          title            VARCHAR(255) NOT NULL,
+          subtitle         VARCHAR(255),
+          description      TEXT,
+          image_url        TEXT,
+          category         VARCHAR(50) NOT NULL DEFAULT 'all',
+          discount_percent INTEGER CHECK (discount_percent IS NULL OR (discount_percent >= 1 AND discount_percent <= 100)),
+          starts_at        TIMESTAMPTZ NOT NULL,
+          ends_at          TIMESTAMPTZ NOT NULL,
+          sort_order       INTEGER NOT NULL DEFAULT 0,
+          is_active        BOOLEAN NOT NULL DEFAULT true,
+          created_at       TIMESTAMPTZ DEFAULT NOW(),
+          updated_at       TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_seasonal_promotions_active ON seasonal_promotions (is_active, starts_at, ends_at)`);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS seasonal_promotion_products (
+          promotion_id UUID NOT NULL REFERENCES seasonal_promotions(id) ON DELETE CASCADE,
+          product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          PRIMARY KEY (promotion_id, product_id)
+        )
+      `);
+      console.log('[Migration] ✓ Seasonal promotions table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Seasonal promotions table:', e.message);
+    }
+
     // Create user_coupons table
     try {
       await pool.query(`
@@ -1225,6 +1261,7 @@ try {
 const authRouter = require('./features/auth/auth.router');
 const notificationsRouter = require('./features/notifications/notifications.router');
 const flashDealsRouter = require('./features/flash-deals/flash-deals.router');
+const seasonalPromotionsRouter = require('./features/seasonal-promotions/seasonal-promotions.router');
 const productsRouter = require('./features/products/products.router');
 const uploadRouter = require('./features/upload/upload.router');
 const telegramRouter = require('./features/telegram/telegram.routes');
@@ -1364,6 +1401,7 @@ app.get('/api/v1/health', async (_req, res) => {
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/notifications', notificationsRouter);
 app.use('/api/v1/flash-deals', flashDealsRouter);
+app.use('/api/v1/seasonal-promotions', seasonalPromotionsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/v1/categories', (req, res, next) => { req.url = '/categories' + (req.url === '/' ? '' : req.url); productsRouter(req, res, next); });
 app.use('/api/v1/upload', uploadRouter);
