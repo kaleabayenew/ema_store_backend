@@ -8,8 +8,10 @@ const getAllProducts = async (req, res, next) => {
   try {
     const { category, search, status, partnerId, lean } = req.query;
     const limit = parseInt(req.query.limit) || 15;
-    const page  = Math.max(1, parseInt(req.query.page) || 1);
-    const offset = (page - 1) * limit;
+    const offset = req.query.offset !== undefined
+      ? Math.max(0, parseInt(req.query.offset) || 0)
+      : Math.max(0, ((parseInt(req.query.page) || 1) - 1) * limit);
+    const page = Math.floor(offset / limit) + 1;
 
     const { products, total, approved, pending, avgRating } = await service.getAllProducts({
       category,

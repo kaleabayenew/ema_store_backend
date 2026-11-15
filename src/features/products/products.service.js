@@ -17,7 +17,7 @@ function ensureCoinPriceColumn() {
   if (!_coinPriceEnsured) {
     _coinPriceEnsured = pool
       .query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS coin_price INTEGER`)
-      .catch(() => {});
+      .catch(() => { });
   }
   return _coinPriceEnsured;
 }
@@ -142,7 +142,7 @@ async function getAllProducts({
   let where = '';
 
   if (category) {
-    where += ` AND c.slug = $${paramIndex}`;
+    where += ` AND (c.slug = $${paramIndex} OR c.id = $${paramIndex} OR LOWER(c.name_en) = LOWER($${paramIndex}) OR p.category = $${paramIndex})`;
     params.push(category);
     paramIndex++;
   }
@@ -186,7 +186,6 @@ async function getAllProducts({
     SELECT
       p.id,
       p.name_en,
-      p.name,
       p.category,
       p.price_cents,
       p.discount_cents,
@@ -240,7 +239,7 @@ async function getAllProducts({
           p.primaryImageUrl = pImgs[0].image_url;
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   return { products, total, approved, pending, avgRating };
