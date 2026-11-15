@@ -73,6 +73,7 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
           price_cents: product.price_cents,
           discount_cents: product.discount_cents,
           coin_price: product.coin_price,
+          promotion_id: item.promotionId || item.promotion_id || null,
         });
       }
     } else {
