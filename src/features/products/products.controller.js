@@ -1,4 +1,4 @@
-const service = require('./products.service');
+﻿const service = require('./products.service');
 const { ok, created, error } = require('../../core/utils/response');
 
 // ── GET /api/v1/products

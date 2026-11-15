@@ -124,6 +124,9 @@ async function getPromotionProducts(id) {
      LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
      LEFT JOIN categories c ON p.category = c.id
      WHERE spp.promotion_id = $1
+       AND sp.is_active = true
+       AND sp.starts_at <= NOW()
+       AND sp.ends_at > NOW()
        AND p.is_visible = true
      ORDER BY p.name_en`,
     [id],
