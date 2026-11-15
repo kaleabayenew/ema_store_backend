@@ -1,6 +1,21 @@
 const { ok, created, error } = require('../../core/utils/response');
 const { pool } = require('../../core/config/database');
 
+// GET /api/v1/banners - Get all active banners for customer app
+const getActiveBanners = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT * FROM payment_banners
+      WHERE is_active = true
+      ORDER BY created_at DESC
+    `);
+
+    ok(res, { banners: rows });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // GET /api/v1/banners/payment - Get active payment banner
 const getPaymentBanner = async (req, res, next) => {
   try {
@@ -98,6 +113,7 @@ const deletePaymentBanner = async (req, res, next) => {
 };
 
 module.exports = {
+  getActiveBanners,
   getPaymentBanner,
   createPaymentBanner,
   getAllPaymentBanners,
