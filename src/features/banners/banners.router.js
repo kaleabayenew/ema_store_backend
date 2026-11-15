@@ -4,7 +4,9 @@ const { requireStaff } = require('../../core/middleware/auth');
 
 const router = Router();
 
-// Public endpoint
+// Public endpoints (for customer app and web visitors)
+router.get('/', ctrl.getActiveBanners);
+router.get('/active', ctrl.getActiveBanners);
 router.get('/payment', ctrl.getPaymentBanner);
 
 // Admin endpoints (require auth)
