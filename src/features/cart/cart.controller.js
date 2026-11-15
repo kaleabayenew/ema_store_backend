@@ -19,9 +19,14 @@ const getUserCart = async (req, res, next) => {
 const addToCart = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { productId, quantity } = req.body;
+    const { productId, quantity, promotionId } = req.body;
 
-    const result = await service.addToCart(userId, productId, quantity);
+    const result = await service.addToCart(
+      userId,
+      productId,
+      quantity === undefined ? 1 : quantity,
+      promotionId || null,
+    );
 
     created(res, result);
   } catch (err) {

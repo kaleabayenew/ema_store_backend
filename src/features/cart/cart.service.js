@@ -18,10 +18,21 @@ async function getUserCart(userId) {
       p.price_cents,
       p.discount_cents,
       p.stock,
-      pi.image_url
+      pi.image_url,
+      sp.id AS promo_id,
+      sp.discount_percent AS promo_discount_percent
     FROM cart_items ci
     JOIN products p ON ci.product_id = p.id
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+    LEFT JOIN seasonal_promotions sp
+      ON sp.id = ci.promotion_id
+     AND sp.is_active = true
+     AND sp.starts_at <= NOW()
+     AND sp.ends_at > NOW()
+     AND EXISTS (
+       SELECT 1 FROM seasonal_promotion_products spp
+       WHERE spp.promotion_id = sp.id AND spp.product_id = ci.product_id
+     )
     WHERE ci.user_id = $1
     ORDER BY ci.created_at DESC
   `, [userId]);
@@ -37,6 +48,11 @@ async function getUserCart(userId) {
     nameOm: row.name_om,
     priceCents: row.price_cents,
     discountCents: row.discount_cents,
+    promotionId: row.promo_id || null,
+    promoPriceCents:
+      row.promo_id && row.promo_discount_percent
+        ? Math.round(row.price_cents * (1 - row.promo_discount_percent / 100))
+        : null,
     stock: row.stock,
     imageUrl: row.image_url,
     createdAt: row.created_at,
@@ -45,11 +61,22 @@ async function getUserCart(userId) {
 
 // ── Add Item to Cart ─────────────────────────────────────────────────────
 
-async function addToCart(userId, productId, quantity = 1) {
+async function addToCart(userId, productId, quantity = 1, promotionId = null) {
   // Positive whole-number quantities only — negative values would corrupt
   // order totals downstream.
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
     throw new AppError('Quantity must be a whole number between 1 and 99.', 400, 'INVALID_QUANTITY');
+  }
+
+  // A promotion id is only honoured when it is an active seasonal promo
+  // that actually contains this product — otherwise it is ignored.
+  let validPromotionId = null;
+  if (promotionId) {
+    try {
+      const { resolvePromotionForProduct } = require('../seasonal-promotions/seasonal-promotions.service');
+      const promo = await resolvePromotionForProduct(productId, promotionId);
+      validPromotionId = promo ? promo.id : null;
+    } catch (_) { validPromotionId = null; }
   }
 
   // Check if product exists and has stock
@@ -75,21 +102,28 @@ async function addToCart(userId, productId, quantity = 1) {
   );
 
   if (existing.length > 0) {
-    // Update quantity
+    // Update quantity; attach the promotion context when supplied
     const newQuantity = existing[0].quantity + quantity;
-    await pool.query(
-      'UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE id = $2',
-      [newQuantity, existing[0].id]
-    );
+    if (validPromotionId) {
+      await pool.query(
+        'UPDATE cart_items SET quantity = $1, promotion_id = $2, updated_at = NOW() WHERE id = $3',
+        [newQuantity, validPromotionId, existing[0].id]
+      );
+    } else {
+      await pool.query(
+        'UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE id = $2',
+        [newQuantity, existing[0].id]
+      );
+    }
     return { message: 'Cart updated', quantity: newQuantity };
   }
 
   // Add new item
   const { rows } = await pool.query(`
-    INSERT INTO cart_items (user_id, product_id, quantity, price_at_add)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO cart_items (user_id, product_id, quantity, price_at_add, promotion_id)
+    VALUES ($1, $2, $3, $4, $5)
     RETURNING *
-  `, [userId, productId, quantity, product.price_cents]);
+  `, [userId, productId, quantity, product.price_cents, validPromotionId]);
 
   return rows[0];
 }

@@ -102,10 +102,29 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       itemsToOrder = cartItems;
     }
 
+    // Resolve seasonal-promotion pricing per item. A promo only applies
+    // when it is active, contains the product, and was the context the
+    // customer bought through (cart_items.promotion_id or item.promotionId).
+    const { resolvePromotionForProduct } = require('../seasonal-promotions/seasonal-promotions.service');
+    for (const item of itemsToOrder) {
+      const requested = item.promotion_id || item.promotionId || null;
+      if (!requested) continue;
+      try {
+        const promo = await resolvePromotionForProduct(item.product_id, requested);
+        if (promo && promo.discount_percent > 0) {
+          item.promotion_id = promo.id;
+          item.promo_price_cents = Math.round(
+            item.price_cents * (1 - promo.discount_percent / 100),
+          );
+        }
+      } catch (_) { /* promo lookup is best-effort — never block checkout */ }
+    }
+
     // Calculate total
     let totalCents = 0;
     for (const item of itemsToOrder) {
-      const price = item.discount_cents > 0 ? item.discount_cents : item.price_cents;
+      const price = item.promo_price_cents
+        ?? (item.discount_cents > 0 ? item.discount_cents : item.price_cents);
       totalCents += price * item.quantity;
     }
 
@@ -165,12 +184,13 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
 
     // Create order items and update stock
     for (const item of itemsToOrder) {
-      const priceCents = item.discount_cents > 0 ? item.discount_cents : item.price_cents;
+      const priceCents = item.promo_price_cents
+        ?? (item.discount_cents > 0 ? item.discount_cents : item.price_cents);
 
       await client.query(`
-        INSERT INTO order_items (order_id, product_id, quantity, price_at_order)
-        VALUES ($1, $2, $3, $4)
-      `, [order.id, item.product_id, item.quantity, priceCents]);
+        INSERT INTO order_items (order_id, product_id, quantity, price_at_order, promotion_id)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [order.id, item.product_id, item.quantity, priceCents, item.promotion_id || null]);
 
       // Atomic stock decrement — the WHERE guard prevents overselling when
       // two orders race for the last unit (the earlier SELECT is not locked).
