@@ -897,6 +897,10 @@ async function autoMigrate() {
     // purchases keep working with no promotion attached).
     await pool.query(`ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS promotion_id UUID`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS promotion_id UUID`);
+    // Coupon redemption on orders
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_id UUID`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_code VARCHAR(50)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_cents INTEGER DEFAULT 0`);
 
     // Create payment_methods table
     await pool.query(`
@@ -1009,6 +1013,26 @@ async function autoMigrate() {
       console.log('[Migration] ✓ Wheel slices table');
     } catch (e) {
       console.log('[Migration] ⚠ Wheel slices table:', e.message);
+    }
+
+    // Create app_page_controls table (admin hide/lock per app page)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS app_page_controls (
+          id SERIAL PRIMARY KEY,
+          app VARCHAR(20) NOT NULL,
+          page_key VARCHAR(120) NOT NULL,
+          title VARCHAR(120) NOT NULL,
+          is_hidden BOOLEAN NOT NULL DEFAULT false,
+          is_locked BOOLEAN NOT NULL DEFAULT false,
+          sort_order INTEGER NOT NULL DEFAULT 9999,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE (app, page_key)
+        )
+      `);
+      console.log('[Migration] ✓ App page controls table');
+    } catch (e) {
+      console.log('[Migration] ⚠ App page controls table:', e.message);
     }
 
     // Create coin_settings table (coin → balance conversion rate)
@@ -1287,6 +1311,7 @@ const recentlyViewedRouter = require('./features/recently-viewed/recently_viewed
 const marketingRouter = require('./features/marketing/marketing.router');
 const aboutRouter = require('./features/about/about.router');
 const appUpdateRouter = require('./features/app-update/app-update.router');
+const appPagesRouter = require('./features/app-pages/app-pages.router');
 
 const app = express();
 
@@ -1428,6 +1453,7 @@ app.use('/api/v1/recently-viewed', recentlyViewedRouter);
 app.use('/api/v1/marketing', marketingRouter);
 app.use('/api/v1/about', aboutRouter);
 app.use('/api/v1/app-update', appUpdateRouter);
+app.use('/api/v1/app-pages', appPagesRouter);
 
 // ── Partner routes ─────────────────────────────────────────────────────────────
 const partnerAuthRouter = require('./features/partner/auth/auth.router');
