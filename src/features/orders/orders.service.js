@@ -124,8 +124,9 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // Calculate total
     let totalCents = 0;
     for (const item of itemsToOrder) {
-      const price = item.promo_price_cents
-        ?? (item.discount_cents > 0 ? item.discount_cents : item.price_cents);
+      const hasDiscount = item.discount_cents > 0 && item.discount_cents < item.price_cents;
+      const normalPrice = hasDiscount ? (item.price_cents - item.discount_cents) : item.price_cents;
+      const price = item.promo_price_cents ?? normalPrice;
       totalCents += price * item.quantity;
     }
 
@@ -203,8 +204,9 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
 
     // Create order items and update stock
     for (const item of itemsToOrder) {
-      const priceCents = item.promo_price_cents
-        ?? (item.discount_cents > 0 ? item.discount_cents : item.price_cents);
+      const hasDiscount = item.discount_cents > 0 && item.discount_cents < item.price_cents;
+      const normalPrice = hasDiscount ? (item.price_cents - item.discount_cents) : item.price_cents;
+      const priceCents = item.promo_price_cents ?? normalPrice;
 
       await client.query(`
         INSERT INTO order_items (order_id, product_id, quantity, price_at_order, promotion_id)
