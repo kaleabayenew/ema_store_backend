@@ -1,4 +1,4 @@
-﻿const { pool } = require('../../core/config/database');
+const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 
 // ============================================================================
@@ -20,6 +20,7 @@ async function getUserCart(userId) {
       p.stock,
       pi.image_url,
       sp.id AS promo_id,
+      sp.title AS promo_title,
       sp.discount_percent AS promo_discount_percent
     FROM cart_items ci
     JOIN products p ON ci.product_id = p.id
@@ -49,6 +50,8 @@ async function getUserCart(userId) {
     priceCents: row.price_cents,
     discountCents: row.discount_cents,
     promotionId: row.promo_id || null,
+    promoTitle: row.promo_title || null,
+    promoDiscountPercent: row.promo_discount_percent || null,
     promoPriceCents:
       row.promo_id && row.promo_discount_percent
         ? Math.round(row.price_cents * (1 - row.promo_discount_percent / 100))
@@ -95,30 +98,28 @@ async function addToCart(userId, productId, quantity = 1, promotionId = null) {
     throw new AppError('Insufficient stock', 400, 'INSUFFICIENT_STOCK');
   }
 
-  // Check if item already in cart
+  // Check if item already in cart with the SAME promotion context
+  // (seasonal promotional items and regular catalog items stay separate)
   const { rows: existing } = await pool.query(
-    'SELECT id, quantity FROM cart_items WHERE user_id = $1 AND product_id = $2',
-    [userId, productId]
+    `SELECT id, quantity FROM cart_items
+     WHERE user_id = $1 AND product_id = $2 AND (
+       (promotion_id = $3 AND $3 IS NOT NULL) OR
+       (promotion_id IS NULL AND $3 IS NULL)
+     )`,
+    [userId, productId, validPromotionId]
   );
 
   if (existing.length > 0) {
-    // Update quantity; attach the promotion context when supplied
+    // Update quantity for this specific promotion context
     const newQuantity = existing[0].quantity + quantity;
-    if (validPromotionId) {
-      await pool.query(
-        'UPDATE cart_items SET quantity = $1, promotion_id = $2, updated_at = NOW() WHERE id = $3',
-        [newQuantity, validPromotionId, existing[0].id]
-      );
-    } else {
-      await pool.query(
-        'UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE id = $2',
-        [newQuantity, existing[0].id]
-      );
-    }
+    await pool.query(
+      'UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE id = $2',
+      [newQuantity, existing[0].id]
+    );
     return { message: 'Cart updated', quantity: newQuantity };
   }
 
-  // Add new item
+  // Add as a new, separate line item
   const { rows } = await pool.query(`
     INSERT INTO cart_items (user_id, product_id, quantity, price_at_add, promotion_id)
     VALUES ($1, $2, $3, $4, $5)

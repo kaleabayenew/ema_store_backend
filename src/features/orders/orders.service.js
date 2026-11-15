@@ -8,7 +8,7 @@ const { AppError } = require('../../core/errors/app_error');
 
 // ── Create Order from Cart or Direct Items ─────────────────────────────────
 
-async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null } = {}) {
+async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null, couponCode = null } = {}) {
   // Idempotent replay: a retried checkout (e.g. after a client timeout)
   // returns the original order instead of charging/creating twice.
   if (idempotencyKey) {
@@ -128,6 +128,24 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       totalCents += price * item.quantity;
     }
 
+    // ── Coupon redemption ─────────────────────────────────────────────
+    // The customer must own an unused claim of the coupon; the discount is
+    // computed server-side from the real order total — never trusted from
+    // the client.
+    let couponId = null;
+    let couponCodeApplied = null;
+    let couponDiscountCents = 0;
+    let userCouponId = null;
+    if (couponCode) {
+      const { validateCouponForOrder } = require('../marketing/marketing.service');
+      const result = await validateCouponForOrder(userId, couponCode, totalCents, client);
+      couponId = result.coupon.id;
+      couponCodeApplied = result.coupon.code;
+      couponDiscountCents = result.discountCents;
+      userCouponId = result.userCouponId;
+      totalCents -= couponDiscountCents;
+    }
+
     // ── Wallet payments: COINS or BALANCE ──────────────────────────────
     // 'COINS'   → every item must have a coin_price; total is in coins.
     // 'BALANCE' → total is the ETB order total charged from users.balance.
@@ -175,10 +193,10 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // Create order (wallet-paid orders start as PAID)
     const orderStatus = walletPayment ? 'PAID' : 'PENDING';
     const { rows: orderRows } = await client.query(`
-      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents]);
 
     const order = orderRows[0];
 
@@ -207,6 +225,12 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // Clear cart only if we used cart items
     if (!directItems) {
       await client.query('DELETE FROM cart_items WHERE user_id = $1', [userId]);
+    }
+
+    // Mark the coupon as redeemed (inside the same transaction).
+    if (userCouponId) {
+      const { markCouponUsed } = require('../marketing/marketing.service');
+      await markCouponUsed(userCouponId, order.id, client);
     }
 
     // Deduct wallet funds + record the transaction for wallet-paid orders.
@@ -286,6 +310,52 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
     LIMIT $2 OFFSET $3
   `, [userId, limit, offset]);
 
+  // Fetch items (with promo info) for each order
+  const orderIds = rows.map((r) => r.id);
+  let itemsByOrder = {};
+  if (orderIds.length > 0) {
+    const placeholders = orderIds.map((_, i) => `$${i + 1}`).join(',');
+    const { rows: itemRows } = await pool.query(`
+      SELECT
+        oi.id,
+        oi.order_id,
+        oi.product_id,
+        oi.quantity,
+        oi.price_at_order,
+        oi.promotion_id,
+        sp.title          AS promotion_title,
+        sp.discount_percent AS promotion_discount_percent,
+        p.name_en,
+        p.name_am,
+        p.name_om,
+        pi.image_url
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+      LEFT JOIN seasonal_promotions sp ON oi.promotion_id = sp.id
+      WHERE oi.order_id IN (${placeholders})
+      ORDER BY oi.order_id, oi.id
+    `, orderIds);
+
+    for (const item of itemRows) {
+      if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
+      itemsByOrder[item.order_id].push({
+        id: item.id,
+        order_id: item.order_id,
+        product_id: item.product_id,
+        quantity: item.quantity,
+        price_at_order: parseFloat(item.price_at_order),
+        name_en: item.name_en,
+        name_am: item.name_am,
+        name_om: item.name_om,
+        image_url: item.image_url ?? null,
+        promotion_id: item.promotion_id ?? null,
+        promotion_title: item.promotion_title ?? null,
+        promotion_discount_percent: item.promotion_discount_percent ?? null,
+      });
+    }
+  }
+
   // Return snake_case fields — Flutter OrdersRepository._fromJson reads these directly
   return rows.map((r) => ({
     id: r.id,
@@ -298,6 +368,7 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
     total_cents: r.total_cents ?? Math.round(parseFloat(r.total_amount ?? 0) * 100),
     total_amount: parseFloat(r.total_amount ?? 0),
     item_count: r.item_count,
+    items: itemsByOrder[r.id] || [],
   }));
 }
 
@@ -499,6 +570,9 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       oi.product_id,
       oi.quantity,
       oi.price_at_order,
+      oi.promotion_id,
+      sp.title AS promo_title,
+      sp.discount_percent AS promo_discount_percent,
       p.name_en,
       p.name_am,
       p.name_om,
@@ -507,6 +581,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
     FROM order_items oi
     JOIN products p ON oi.product_id = p.id
     LEFT JOIN product_images pi ON p.id = pi.product_id AND pi.is_primary = true
+    LEFT JOIN seasonal_promotions sp ON oi.promotion_id = sp.id
     WHERE oi.order_id = $1
   `, [orderId]);
 
@@ -529,6 +604,9 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
         productImage: i.image_url ?? null,
         quantity: i.quantity,
         priceAtOrder: parseFloat(i.price_at_order) / 100,  // cents → ETB
+        promotionId: i.promotion_id ?? null,
+        promotionTitle: i.promo_title ?? null,
+        promotionDiscountPercent: i.promo_discount_percent ?? null,
       })),
     };
   }
@@ -554,6 +632,9 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       name_am: i.name_am,
       name_om: i.name_om,
       image_url: i.image_url ?? null,
+      promotion_id: i.promotion_id ?? null,
+      promotion_title: i.promo_title ?? null,
+      promotion_discount_percent: i.promo_discount_percent ?? null,
     })),
   };
 }

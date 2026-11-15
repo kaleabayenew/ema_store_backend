@@ -6,11 +6,12 @@ const { ok, created } = require('../../core/utils/response');
 const createOrder = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { shippingAddress, paymentMethod, items, deliveryMethod, paymentId } = req.body;
+    const { shippingAddress, paymentMethod, items, deliveryMethod, paymentId, couponCode } = req.body;
 
     const order = await service.createOrder(userId, shippingAddress, paymentMethod, items, {
       deliveryMethod: typeof deliveryMethod === 'string' ? deliveryMethod.slice(0, 255) : null,
       paymentId: typeof paymentId === 'string' ? paymentId.slice(0, 255) : null,
+      couponCode: typeof couponCode === 'string' ? couponCode.slice(0, 50) : null,
       idempotencyKey: (req.get('Idempotency-Key') || req.body.idempotency_key || '').toString().slice(0, 128) || null,
     });
 

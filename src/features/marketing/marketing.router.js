@@ -10,10 +10,16 @@ router.get('/spin-wheel', authenticate, ctrl.getSpinWheel);
 router.post('/spin-wheel/play', authenticate, ctrl.playSpinWheel);
 router.get('/coupons/my-coupons', authenticate, ctrl.getMyCoupons);
 router.post('/coupons/claim', authenticate, ctrl.claimCouponByCode);
+router.post('/coupons/validate', authenticate, ctrl.validateCouponPreview);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 
 router.get('/admin/wheel-config', authenticate, requireStaff, ctrl.getAdminWheel);
 router.put('/admin/wheel-config', authenticate, requireStaff, ctrl.updateAdminWheel);
+
+router.get('/admin/coupons', authenticate, requireStaff, ctrl.adminGetCoupons);
+router.post('/admin/coupons', authenticate, requireStaff, ctrl.adminCreateCoupon);
+router.patch('/admin/coupons/:id', authenticate, requireStaff, ctrl.adminUpdateCoupon);
+router.delete('/admin/coupons/:id', authenticate, requireStaff, ctrl.adminDeleteCoupon);
 
 module.exports = router;
