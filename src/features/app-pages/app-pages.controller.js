@@ -25,4 +25,21 @@ async function getState(req, res, next) {
   } catch (e) { next(e); }
 }
 
-module.exports = { listPages, updatePage, getState };
+async function getMaintenance(req, res, next) {
+  try {
+    const maintenance = await svc.getMaintenance(req.params.app);
+    ok(res, { app: req.params.app, maintenance });
+  } catch (e) { next(e); }
+}
+
+async function setMaintenance(req, res, next) {
+  try {
+    const maintenance = await svc.setMaintenance(req.params.app, {
+      enabled: req.body?.enabled,
+      message: req.body?.message,
+    });
+    ok(res, { app: req.params.app, maintenance });
+  } catch (e) { next(e); }
+}
+
+module.exports = { listPages, updatePage, getState, getMaintenance, setMaintenance };

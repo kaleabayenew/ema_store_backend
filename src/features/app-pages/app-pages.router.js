@@ -1,14 +1,16 @@
 const { Router } = require('express');
-const { authenticate, requireAuth, requireStaff } = require('../../core/middleware/auth');
+const { requireAuth, requireSuperAdmin } = require('../../core/middleware/auth');
 const ctrl = require('./app-pages.controller');
 
 const router = Router();
 
-// App-facing state (hide/lock map) — any authenticated user.
-router.get('/state', authenticate, ctrl.getState);
+// App-facing state (hide/lock map) — public: guest sessions need it too.
+router.get('/state', ctrl.getState);
 
-// Staff management.
-router.get('/:app', requireAuth, requireStaff, ctrl.listPages);
-router.put('/:app/:pageKey', requireAuth, requireStaff, ctrl.updatePage);
+// Staff management — SUPER_ADMIN only.
+router.get('/:app', requireAuth, requireSuperAdmin, ctrl.listPages);
+router.get('/:app/maintenance', requireAuth, requireSuperAdmin, ctrl.getMaintenance);
+router.put('/:app/maintenance', requireAuth, requireSuperAdmin, ctrl.setMaintenance);
+router.put('/:app/:pageKey', requireAuth, requireSuperAdmin, ctrl.updatePage);
 
 module.exports = router;
