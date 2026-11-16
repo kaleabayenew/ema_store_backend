@@ -1035,6 +1035,21 @@ async function autoMigrate() {
       console.log('[Migration] ⚠ App page controls table:', e.message);
     }
 
+    // Create app_maintenance table (per-app maintenance mode toggle)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS app_maintenance (
+          app VARCHAR(20) PRIMARY KEY,
+          enabled BOOLEAN NOT NULL DEFAULT false,
+          message TEXT,
+          updated_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      console.log('[Migration] ✓ App maintenance table');
+    } catch (e) {
+      console.log('[Migration] ⚠ App maintenance table:', e.message);
+    }
+
     // Create coin_settings table (coin → balance conversion rate)
     try {
       await pool.query(`
