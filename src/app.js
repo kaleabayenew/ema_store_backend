@@ -1499,6 +1499,10 @@ app.use('/api/v1/partner/settings', partnerSettingsRouter);
 const deliveryRouter = require('./features/delivery/delivery.router');
 app.use('/api/v1/delivery', deliveryRouter);
 
+// ── Proof upload & serving routes ─────────────────────────────────────────────
+const proofRouter = require('./features/proof/proof.router');
+app.use('/api/v1/proof', proofRouter);
+
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
   res.json({
