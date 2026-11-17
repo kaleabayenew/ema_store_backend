@@ -1327,6 +1327,7 @@ const marketingRouter = require('./features/marketing/marketing.router');
 const aboutRouter = require('./features/about/about.router');
 const appUpdateRouter = require('./features/app-update/app-update.router');
 const appPagesRouter = require('./features/app-pages/app-pages.router');
+const qrRouter = require('./features/qr/qr.router');
 
 const app = express();
 
@@ -1469,6 +1470,7 @@ app.use('/api/v1/marketing', marketingRouter);
 app.use('/api/v1/about', aboutRouter);
 app.use('/api/v1/app-update', appUpdateRouter);
 app.use('/api/v1/app-pages', appPagesRouter);
+app.use('/api/v1/qr', qrRouter);
 
 // ── Partner routes ─────────────────────────────────────────────────────────────
 const partnerAuthRouter = require('./features/partner/auth/auth.router');
@@ -1492,6 +1494,10 @@ app.use('/api/v1/partner/profile', partnerProfileRouter);
 app.use('/api/v1/partner/reviews', partnerReviewsRouter);
 app.use('/api/v1/partner/promotions', partnerPromotionsRouter);
 app.use('/api/v1/partner/settings', partnerSettingsRouter);
+
+// ── Delivery agent routes (handover offers) ───────────────────────────────────
+const deliveryRouter = require('./features/delivery/delivery.router');
+app.use('/api/v1/delivery', deliveryRouter);
 
 // ── Root ───────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
