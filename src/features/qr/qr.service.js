@@ -2,12 +2,13 @@ const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../../core/config');
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
+const { encryptDynamicToken, decryptDynamicToken } = require('../orders/order_flow');
 
 // 5 minutes in seconds
 const QR_TTL_SECONDS = 300;
 
 /**
- * Generate a dynamic 5-minute signed QR token for the authenticated user.
+ * Generate a dynamic 5-minute encrypted AES-256-GCM QR token for the authenticated user.
  */
 async function generateUserQrToken(userId) {
   const { rows } = await pool.query(
@@ -37,6 +38,7 @@ async function generateUserQrToken(userId) {
 
   const payload = {
     sub: user.id,
+    userId: user.id,
     role: user.role,
     phone: user.phone,
     name: user.full_name,
@@ -44,18 +46,15 @@ async function generateUserQrToken(userId) {
     type: 'USER_QR',
   };
 
-  const token = jwt.sign(payload, jwtSecret, {
-    expiresIn: QR_TTL_SECONDS,
-    issuer: 'ema-store',
-    audience: 'ema-qr',
-  });
-
-  const qrToken = `EMA-QR:v1:${token}`;
-  const expiresAt = new Date(Date.now() + QR_TTL_SECONDS * 1000).toISOString();
+  const { token, expiresInSeconds, expiresAt } = encryptDynamicToken(
+    payload,
+    'EMA-QR:v2:',
+    QR_TTL_SECONDS,
+  );
 
   return {
-    qrToken,
-    expiresInSeconds: QR_TTL_SECONDS,
+    qrToken: token,
+    expiresInSeconds,
     expiresAt,
     user: {
       id: user.id,
@@ -82,23 +81,73 @@ async function verifyQrToken(rawQrString) {
 
   let token = rawQrString.trim();
 
-  // Strip prefix if present
-  if (token.startsWith('EMA-QR:v1:')) {
-    token = token.slice('EMA-QR:v1:'.length).trim();
-  } else if (token.startsWith('EMA-QR:')) {
-    token = token.slice('EMA-QR:'.length).trim();
-  }
-
   try {
-    const decoded = jwt.verify(token, jwtSecret, {
-      issuer: 'ema-store',
-      audience: 'ema-qr',
-    });
+    let targetUserId = null;
+    let shopName = null;
+    let expiresAt = null;
+
+    if (token.startsWith('EMA-QR:v2:') || token.startsWith('EMA-DYN:v2:')) {
+      const payload = decryptDynamicToken(token);
+      targetUserId = payload.sub || payload.userId || payload.id;
+      shopName = payload.shopName || null;
+      expiresAt = payload.exp ? new Date(payload.exp).toISOString() : null;
+    } else if (token.startsWith('EMA-AGENTQR:v1:')) {
+      const { decryptAgentQr } = require('../delivery/agent_qr');
+      const agentCode = decryptAgentQr(token);
+      const { rows } = await pool.query(
+        'SELECT id, agent_code, full_name, phone, is_active FROM delivery_agents WHERE agent_code = $1',
+        [agentCode]
+      );
+      const agent = rows[0];
+      if (!agent || agent.is_active === false) {
+        return {
+          valid: false,
+          code: 'NOT_FOUND',
+          message: 'Delivery agent not found or inactive.',
+        };
+      }
+      return {
+        valid: true,
+        code: 'VERIFIED',
+        message: 'Delivery agent QR verified successfully.',
+        agent: {
+          id: agent.id,
+          code: agent.agent_code,
+          name: agent.full_name,
+          phone: agent.phone,
+        },
+        verifiedAt: new Date().toISOString(),
+      };
+    } else {
+      // Legacy JWT v1 fallback
+      let jwtToken = token;
+      if (jwtToken.startsWith('EMA-QR:v1:')) {
+        jwtToken = jwtToken.slice('EMA-QR:v1:'.length).trim();
+      } else if (jwtToken.startsWith('EMA-QR:')) {
+        jwtToken = jwtToken.slice('EMA-QR:'.length).trim();
+      }
+
+      const decoded = jwt.verify(jwtToken, jwtSecret, {
+        issuer: 'ema-store',
+        audience: 'ema-qr',
+      });
+      targetUserId = decoded.sub;
+      shopName = decoded.shopName || null;
+      expiresAt = decoded.exp ? new Date(decoded.exp * 1000).toISOString() : null;
+    }
+
+    if (!targetUserId) {
+      return {
+        valid: false,
+        code: 'INVALID_QR_TOKEN',
+        message: 'No user identified in QR code.',
+      };
+    }
 
     // Check user in database
     const { rows } = await pool.query(
       'SELECT id, phone, full_name, role, is_active, is_blocked FROM users WHERE id = $1',
-      [decoded.sub]
+      [targetUserId]
     );
     const user = rows[0];
 
@@ -110,7 +159,6 @@ async function verifyQrToken(rawQrString) {
       };
     }
 
-    let shopName = decoded.shopName || null;
     if (!shopName && (user.role === 'PARTNER' || user.role === 'SELLER')) {
       try {
         const pRes = await pool.query(
@@ -118,7 +166,7 @@ async function verifyQrToken(rawQrString) {
           [user.id]
         );
         shopName = pRes.rows[0]?.shop_name || null;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     return {
@@ -133,15 +181,14 @@ async function verifyQrToken(rawQrString) {
         shopName,
       },
       verifiedAt: new Date().toISOString(),
-      expiresAt: new Date(decoded.exp * 1000).toISOString(),
+      expiresAt,
     };
   } catch (err) {
-    if (err.name === 'TokenExpiredError') {
+    if (err.code === 'TOKEN_EXPIRED' || err.name === 'TokenExpiredError' || err.message?.includes('expired')) {
       return {
         valid: false,
         code: 'EXPIRED',
         message: 'QR code expired. Please ask the user to refresh their QR code.',
-        expiredAt: err.expiredAt ? new Date(err.expiredAt).toISOString() : null,
       };
     }
     return {
