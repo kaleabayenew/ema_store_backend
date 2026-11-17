@@ -18,7 +18,11 @@ const updateStock = async (req, res, next) => {
     if (quantity === undefined || quantity === null) {
       return error(res, 'quantity is required.', 400, 'MISSING_FIELDS');
     }
-    const product = await service.updateStock(partnerId, req.params.productId, parseInt(quantity));
+    const qty = Number(quantity);
+    if (!Number.isInteger(qty) || qty < 0) {
+      return error(res, 'quantity must be a whole number, 0 or more.', 400, 'INVALID_QUANTITY');
+    }
+    const product = await service.updateStock(partnerId, req.params.productId, qty);
     ok(res, { product });
   } catch (err) {
     next(err);

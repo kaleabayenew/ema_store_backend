@@ -38,4 +38,41 @@ const updateStatus = async (req, res, next) => {
   }
 };
 
-module.exports = { getOrders, getOrder, updateStatus };
+const updatePaymentMethod = async (req, res, next) => {
+  try {
+    const partnerId = req.user.id;
+    const body = req.body || {};
+    const method = body.paymentMethod || body.payment_method;
+    if (!method) return error(res, 'paymentMethod is required.', 400, 'MISSING_FIELDS');
+    const order = await service.updatePaymentMethod(partnerId, req.params.id, method);
+    ok(res, { order });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Step 1 of "Out from the shop": scanned delivery ID → who + what (no changes).
+const scanHandover = async (req, res, next) => {
+  try {
+    const { agentCode } = req.body || {};
+    if (!agentCode) return error(res, 'agentCode is required.', 400, 'MISSING_FIELDS');
+    const result = await service.previewHandover(req.user.id, req.params.id, agentCode);
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Step 2: partner confirms → order SHIPPED, hand-over ID issued.
+const confirmHandover = async (req, res, next) => {
+  try {
+    const { agentCode } = req.body || {};
+    if (!agentCode) return error(res, 'agentCode is required.', 400, 'MISSING_FIELDS');
+    const order = await service.confirmHandover(req.user.id, req.params.id, agentCode);
+    ok(res, { order });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getOrders, getOrder, updateStatus, updatePaymentMethod, scanHandover, confirmHandover };
