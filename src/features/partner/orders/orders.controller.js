@@ -1,4 +1,10 @@
 ﻿const service = require('./orders.service');
+const { isEncryptedAgentQr, decryptAgentQr } = require('../../delivery/agent_qr');
+
+// The delivery person's QR carries an encrypted, 5-minute token. Decrypt it to
+// the plain agent code; typed-in plain codes pass through unchanged.
+const resolveAgentCode = (raw) =>
+  isEncryptedAgentQr(raw) ? decryptAgentQr(raw) : raw;
 const { ok, error } = require('../../../core/utils/response');
 
 const getOrders = async (req, res, next) => {
@@ -56,7 +62,7 @@ const scanHandover = async (req, res, next) => {
   try {
     const { agentCode } = req.body || {};
     if (!agentCode) return error(res, 'agentCode is required.', 400, 'MISSING_FIELDS');
-    const result = await service.previewHandover(req.user.id, req.params.id, agentCode);
+    const result = await service.previewHandover(req.user.id, req.params.id, resolveAgentCode(agentCode));
     ok(res, result);
   } catch (err) {
     next(err);
@@ -68,7 +74,7 @@ const confirmHandover = async (req, res, next) => {
   try {
     const { agentCode } = req.body || {};
     if (!agentCode) return error(res, 'agentCode is required.', 400, 'MISSING_FIELDS');
-    const order = await service.confirmHandover(req.user.id, req.params.id, agentCode);
+    const order = await service.confirmHandover(req.user.id, req.params.id, resolveAgentCode(agentCode));
     ok(res, { order });
   } catch (err) {
     next(err);
