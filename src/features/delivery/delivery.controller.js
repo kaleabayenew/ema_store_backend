@@ -68,6 +68,15 @@ const confirmPickup = async (req, res, next) => {
   }
 };
 
+const markArrived = async (req, res, next) => {
+  try {
+    const result = await service.markArrived(agentCode(req), req.params.orderId);
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const scanDelivery = async (req, res, next) => {
   try {
     const { customerQrToken, proof, qrToken } = req.body || {};
@@ -90,4 +99,5 @@ module.exports = {
   getHistory,
   confirmPickup,
   scanDelivery,
+  markArrived,
 };

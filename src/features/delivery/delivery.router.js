@@ -15,5 +15,6 @@ router.get('/active', ctrl.getActiveDelivery);
 router.get('/history', ctrl.getHistory);
 router.post('/orders/:orderId/pickup/confirm', ctrl.confirmPickup);
 router.post('/orders/:orderId/deliver/scan', ctrl.scanDelivery);
+router.post('/orders/:orderId/arrived', ctrl.markArrived);
 
 module.exports = router;

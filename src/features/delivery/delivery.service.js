@@ -216,17 +216,23 @@ async function declineOffer(rawCode, orderId) {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, status, delivery_agent_id FROM orders WHERE id = $1 FOR UPDATE`,
+      `SELECT id, status, delivery_agent_id, delivered_at, delivery_requested_at FROM orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
     const order = rows[0];
-    if (order && order.delivery_agent_id === agent.id && order.status !== 'SHIPPED') {
+    const stillInDelivery = order && order.delivery_agent_id === agent.id
+      && !order.delivered_at && order.delivery_requested_at == null;
+    if (stillInDelivery) {
       await client.query(
         `UPDATE orders
          SET delivery_agent_id = NULL,
              delivery_accepted_at = NULL,
              handover_requested_at = NULL,
              handover_proof = NULL,
+             handed_over_at = NULL,
+             handover_code = NULL,
+             rider_arrived_at = NULL,
+             status = CASE WHEN status = 'SHIPPED' THEN 'PACKED' ELSE status END,
              updated_at = NOW()
          WHERE id = $1`,
         [orderId],
@@ -255,7 +261,7 @@ async function getActiveDelivery(rawCode) {
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at, o.delivery_accepted_at,
             o.handover_requested_at, o.handover_proof, o.handed_over_at,
-            o.delivery_requested_at, o.delivery_proof, o.delivered_at,
+            o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
             o.customer_accepted_at, o.payment_status,
             u.full_name AS customer_name, u.phone AS customer_phone,
             shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
@@ -302,6 +308,7 @@ async function getActiveDelivery(rawCode) {
     handoverProof: r.handover_proof,
     handedOverAt: r.handed_over_at,
     deliveryRequestedAt: r.delivery_requested_at,
+    riderArrivedAt: r.rider_arrived_at,
     deliveryProof: r.delivery_proof,
     deliveredAt: r.delivered_at,
     // Step 4: Unredacted details visible to assigned rider
@@ -431,6 +438,10 @@ async function scanDelivery(rawCode, orderId, { customerQrToken, proof = [] }) {
       throw new AppError('You are not assigned to this order.', 403, 'NOT_ASSIGNED_RIDER');
     }
 
+    if (String(order.status).toUpperCase() !== 'SHIPPED') {
+      throw new AppError('Pick up the package from the partner before scanning the customer QR.', 400, 'PICKUP_NOT_CONFIRMED');
+    }
+
     if (String(order.user_id) !== String(scannedUserId)) {
       throw new AppError('Scanned QR code does not match the customer for this order.', 400, 'WRONG_CUSTOMER');
     }
@@ -545,6 +556,47 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
 }
 
 /**
+ * Rider taps 'I have arrived' at the customer address.
+ * Backend verifies the delivery is SHIPPED, then sets rider_arrived_at.
+ */
+async function markArrived(rawCode, orderId) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id, delivered_at, rider_arrived_at FROM orders WHERE id = $1 FOR UPDATE`,
+      [orderId],
+    );
+    const order = rows[0];
+    if (!order) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    if (order.delivery_agent_id !== agent.id) {
+      throw new AppError('You are not assigned to this order.', 403, 'NOT_ASSIGNED_RIDER');
+    }
+    if (String(order.status).toUpperCase() !== 'SHIPPED' || order.delivered_at) {
+      throw new AppError('This delivery is not on the way yet.', 400, 'NOT_ON_THE_WAY');
+    }
+    if (order.rider_arrived_at) {
+      await client.query('COMMIT');
+      return { arrived: true, orderId, alreadyArrived: true };
+    }
+    await client.query(
+      `UPDATE orders SET rider_arrived_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [orderId],
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return { arrived: true, orderId };
+}
+
+/**
  * Rider's own dynamic QR: 5-minute encrypted AES-256-GCM token.
  */
 async function getAgentQr(rawCode) {
@@ -567,5 +619,6 @@ module.exports = {
   getActiveDelivery,
   confirmPickup,
   scanDelivery,
+  markArrived,
   getDeliveryHistory,
 };
