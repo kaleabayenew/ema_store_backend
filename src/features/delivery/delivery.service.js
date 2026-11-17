@@ -1,34 +1,12 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 const { encryptAgentCode } = require('./agent_qr');
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Delivery-agent offers
-//  When a partner confirms a hand-over (orders.status = SHIPPED) the order
-//  becomes an "offer" for that delivery agent. The agent's app polls
-//  GET /api/v1/delivery/offers with their agent code, shows an accept /
-//  reject popup, and calls accept or decline.
-//
-//  Accept  → order stays SHIPPED (delivery_accepted_at is stamped).
-//  Decline → order goes back to PACKED so the partner can hand it to
-//            someone else.
-// ─────────────────────────────────────────────────────────────────────────────
-
-let schemaPromise = null;
-
-function ensureSchema() {
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      await pool.query(
-        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted_at TIMESTAMP`,
-      );
-    })().catch((err) => {
-      schemaPromise = null;
-      throw err;
-    });
-  }
-  return schemaPromise;
-}
+const {
+  ensureOrderFlowSchema,
+  decryptDynamicToken,
+  safeSendNotification,
+  maskPhone,
+} = require('../orders/order_flow');
 
 /** Accepts raw QR content such as "ABC123" or "EMA-AGENT:ABC123". */
 function normalizeAgentCode(raw) {
@@ -57,18 +35,20 @@ async function findAgent(code) {
   return agent;
 }
 
-/** Pending offers for an agent: SHIPPED orders not yet accepted. */
+/**
+ * Step 3: Rider app shows pool of orders nobody has taken yet:
+ * pickup place (shop name + address), delivery place (customer address), items, total.
+ * Customer name/phone and shop phone are HIDDEN until accept.
+ */
 async function listOffers(rawCode) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
 
   const { rows } = await pool.query(
-    `SELECT o.id, o.total_amount, o.payment_method, o.shipping_address,
-            o.delivery_code, o.created_at,
-            u.full_name AS customer_name, u.phone AS customer_phone,
-            shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
+    `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
+            o.delivery_code, o.status, o.created_at,
+            shop.shop_name, shop.address AS shop_address
      FROM orders o
-     JOIN users u ON u.id = o.user_id
      LEFT JOIN LATERAL (
        SELECT p.partner_id FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -76,11 +56,10 @@ async function listOffers(rawCode) {
        LIMIT 1
      ) sp ON true
      LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
-     WHERE o.delivery_agent_id = $1
-       AND o.status = 'SHIPPED'
-       AND o.delivery_accepted_at IS NULL
-     ORDER BY o.handed_over_at DESC NULLS LAST, o.created_at DESC`,
-    [agent.id],
+     WHERE o.delivery_agent_id IS NULL
+       AND o.status IN ('CONFIRMED', 'PACKED')
+     ORDER BY o.created_at DESC
+     LIMIT 50`,
   );
 
   const orderIds = rows.map((r) => r.id);
@@ -110,77 +89,149 @@ async function listOffers(rawCode) {
     },
     offers: rows.map((r) => ({
       id: r.id,
-      orderNumber: String(r.id).slice(0, 8).toUpperCase(),
-      totalAmount: Number(r.total_amount) || 0,
+      orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
+      totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
       paymentMethod: r.payment_method || '',
       shippingAddress: r.shipping_address || '',
       deliveryCode: r.delivery_code || null,
-      customerName: r.customer_name || 'Customer',
-      customerPhone: r.customer_phone || null,
-      shopName: r.shop_name || 'Ema Store',
-      shopAddress: r.shop_address || '',
-      shopPhone: r.shop_phone || null,
+      status: r.status,
+      // Step 3 Privacy: customer name/phone and shop phone hidden until accept
+      customerName: null,
+      customerPhone: null,
+      shopPhone: null,
+      shopName: r.shop_name || 'Ema Store Partner',
+      shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
       items: itemsByOrder[r.id] || [],
       createdAt: r.created_at,
     })),
   };
 }
 
-/** The order must be a pending offer addressed to THIS agent. */
-async function lockOffer(client, agent, orderId) {
-  const { rows } = await client.query(
-    `SELECT id, status, delivery_agent_id, delivery_accepted_at
-     FROM orders WHERE id = $1 FOR UPDATE`,
-    [orderId],
-  );
-  const order = rows[0];
-  if (!order) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
-  if (order.delivery_agent_id !== agent.id ||
-      String(order.status).toUpperCase() !== 'SHIPPED' ||
-      order.delivery_accepted_at) {
-    throw new AppError('This order is not a pending offer for you.', 409, 'NOT_AN_OFFER');
-  }
-  return order;
-}
-
+/**
+ * Step 3 & 4: Rider accepts an offer.
+ * Concurrency row-locking: first rider wins; second gets 409 ORDER_TAKEN.
+ * A rider can hold only ONE active order at a time.
+ */
 async function acceptOffer(rawCode, orderId) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
   const client = await pool.connect();
+  let updatedOrder;
+
   try {
     await client.query('BEGIN');
-    await lockOffer(client, agent, orderId);
-    await client.query(
-      `UPDATE orders SET delivery_accepted_at = NOW(), updated_at = NOW()
-       WHERE id = $1`,
+
+    // 1. Check if this rider already holds an active order
+    const { rows: activeRows } = await client.query(
+      `SELECT id FROM orders
+       WHERE delivery_agent_id = $1
+         AND status IN ('CONFIRMED', 'PACKED', 'SHIPPED')
+         AND delivered_at IS NULL
+       LIMIT 1`,
+      [agent.id],
+    );
+    if (activeRows.length > 0) {
+      throw new AppError(
+        'You already have an active delivery in progress. Complete it before accepting another.',
+        400,
+        'RIDER_HAS_ACTIVE_ORDER',
+      );
+    }
+
+    // 2. Lock target order for update
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id, user_id, delivery_code
+       FROM orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
+    const order = rows[0];
+    if (!order) {
+      throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    }
+
+    // 3. Concurrency check: already taken?
+    if (order.delivery_agent_id && order.delivery_agent_id !== agent.id) {
+      throw new AppError(
+        'This order has already been taken by another rider.',
+        409,
+        'ORDER_TAKEN',
+      );
+    }
+
+    // 4. Update order with this rider
+    const { rows: updatedRows } = await client.query(
+      `UPDATE orders
+       SET delivery_agent_id = $1,
+           delivery_accepted_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [agent.id, orderId],
+    );
+    updatedOrder = updatedRows[0];
     await client.query('COMMIT');
+
+    // Step 4: Dispatch push notifications to partner and customer
+    // Find partner(s)
+    const { rows: partnerRows } = await pool.query(
+      `SELECT DISTINCT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1`,
+      [orderId],
+    );
+    for (const pr of partnerRows) {
+      safeSendNotification(
+        pr.partner_id,
+        'Delivery Rider Assigned',
+        `Rider ${agent.full_name} (${agent.agent_code}) accepted order #${order.delivery_code || orderId.slice(0, 8)}.`,
+        { orderId, type: 'RIDER_ASSIGNED', riderName: agent.full_name },
+      );
+    }
+
+    // Notify customer
+    safeSendNotification(
+      order.user_id,
+      'Rider Assigned to Your Order',
+      `Rider ${agent.full_name} is on the way to pick up your order #${order.delivery_code || orderId.slice(0, 8)}.`,
+      { orderId, type: 'RIDER_ASSIGNED', riderName: agent.full_name },
+    );
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();
   }
-  return { accepted: true, orderId };
+
+  return { accepted: true, orderId, order: updatedOrder };
 }
 
+/**
+ * Rider declines or releases an uncompleted offer.
+ */
 async function declineOffer(rawCode, orderId) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
-    await lockOffer(client, agent, orderId);
-    // Back to PACKED so the partner can hand it to another delivery person.
-    await client.query(
-      `UPDATE orders
-       SET status = 'PACKED', delivery_agent_id = NULL,
-           handed_over_at = NULL, handover_code = NULL,
-           delivery_accepted_at = NULL, updated_at = NOW()
-       WHERE id = $1`,
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id FROM orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
+    const order = rows[0];
+    if (order && order.delivery_agent_id === agent.id && order.status !== 'SHIPPED') {
+      await client.query(
+        `UPDATE orders
+         SET delivery_agent_id = NULL,
+             delivery_accepted_at = NULL,
+             handover_requested_at = NULL,
+             handover_proof = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [orderId],
+      );
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -188,12 +239,234 @@ async function declineOffer(rawCode, orderId) {
   } finally {
     client.release();
   }
+
   return { declined: true, orderId };
 }
 
 /**
- * Rider's own QR: returns the short agent id (shown under the QR) and an
- * AES-256-GCM encrypted, 5-minute token (the QR itself).
+ * Step 4: After accept, rider gets full UNREDACTED details
+ * (partner info + customer info).
+ */
+async function getActiveDelivery(rawCode) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+
+  const { rows } = await pool.query(
+    `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
+            o.delivery_code, o.status, o.created_at, o.delivery_accepted_at,
+            o.handover_requested_at, o.handover_proof, o.handed_over_at,
+            o.delivery_requested_at, o.delivery_proof, o.delivered_at,
+            o.customer_accepted_at, o.payment_status,
+            u.full_name AS customer_name, u.phone AS customer_phone,
+            shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
+     FROM orders o
+     JOIN users u ON u.id = o.user_id
+     LEFT JOIN LATERAL (
+       SELECT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = o.id
+       LIMIT 1
+     ) sp ON true
+     LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+     WHERE o.delivery_agent_id = $1
+       AND o.status IN ('CONFIRMED', 'PACKED', 'SHIPPED')
+       AND o.delivered_at IS NULL
+     ORDER BY o.delivery_accepted_at DESC NULLS LAST
+     LIMIT 1`,
+    [agent.id],
+  );
+
+  if (rows.length === 0) return null;
+  const r = rows[0];
+
+  const { rows: itemRows } = await pool.query(
+    `SELECT oi.order_id, p.name_en AS name, oi.quantity, oi.price_at_order
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     WHERE oi.order_id = $1
+     ORDER BY oi.created_at`,
+    [r.id],
+  );
+
+  return {
+    id: r.id,
+    orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
+    totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
+    paymentMethod: r.payment_method || '',
+    shippingAddress: r.shipping_address || '',
+    deliveryCode: r.delivery_code || null,
+    status: r.status,
+    createdAt: r.created_at,
+    deliveryAcceptedAt: r.delivery_accepted_at,
+    handoverRequestedAt: r.handover_requested_at,
+    handoverProof: r.handover_proof,
+    handedOverAt: r.handed_over_at,
+    deliveryRequestedAt: r.delivery_requested_at,
+    deliveryProof: r.delivery_proof,
+    // Step 4: Unredacted details visible to assigned rider
+    customerName: r.customer_name || 'Customer',
+    customerPhone: r.customer_phone || null,
+    shopName: r.shop_name || 'Ema Store Partner',
+    shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
+    shopPhone: r.shop_phone || null,
+    items: itemRows.map((i) => ({
+      name: i.name || 'Product',
+      quantity: Number(i.quantity) || 1,
+      price: Number(i.price_at_order) || 0,
+    })),
+  };
+}
+
+/**
+ * Step 5d: Handover at the shop.
+ * Rider taps POP-UP button "I took it from the partner".
+ * Status becomes SHIPPED (product responsibility moves to rider).
+ */
+async function confirmPickup(rawCode, orderId) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+  const client = await pool.connect();
+  let updatedOrder;
+
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id, handover_requested_at, user_id, delivery_code
+       FROM orders WHERE id = $1 FOR UPDATE`,
+      [orderId],
+    );
+    const order = rows[0];
+    if (!order) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+
+    if (order.delivery_agent_id !== agent.id) {
+      throw new AppError('You are not assigned to this order.', 403, 'NOT_ASSIGNED_RIDER');
+    }
+
+    if (!order.handover_requested_at) {
+      throw new AppError('Partner has not handed over the package yet.', 400, 'HANDOVER_NOT_REQUESTED');
+    }
+
+    const { rows: updatedRows } = await client.query(
+      `UPDATE orders
+       SET status = 'SHIPPED',
+           handed_over_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [orderId],
+    );
+    updatedOrder = updatedRows[0];
+    await client.query('COMMIT');
+
+    // Notify customer
+    safeSendNotification(
+      order.user_id,
+      'Order On The Way',
+      `Your order #${order.delivery_code || orderId.slice(0, 8)} has been picked up from the shop and is on its way.`,
+      { orderId, type: 'ORDER_SHIPPED' },
+    );
+
+    // Notify partner
+    const { rows: partnerRows } = await pool.query(
+      `SELECT DISTINCT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1`,
+      [orderId],
+    );
+    for (const pr of partnerRows) {
+      safeSendNotification(
+        pr.partner_id,
+        'Handover Completed',
+        `Rider ${agent.full_name} has taken order #${order.delivery_code || orderId.slice(0, 8)}.`,
+        { orderId, type: 'HANDOVER_COMPLETED' },
+      );
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { pickedUp: true, orderId, order: updatedOrder };
+}
+
+/**
+ * Step 6a & 6b: Delivery at the customer.
+ * Rider scans customer's QR. Backend decrypts QR and checks it belongs to
+ * THIS order's customer (else WRONG_CUSTOMER).
+ * Rider submits photo/video proof.
+ * Sets delivery_requested_at and stores proof. Customer app shows pop-up.
+ */
+async function scanDelivery(rawCode, orderId, { customerQrToken, proof = [] }) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+
+  if (!customerQrToken) {
+    throw new AppError('Customer QR token is required.', 400, 'QR_TOKEN_REQUIRED');
+  }
+
+  // Decrypt and verify dynamic customer token
+  const decrypted = decryptDynamicToken(customerQrToken);
+  const scannedUserId = decrypted.userId || decrypted.sub || decrypted.id;
+  if (!scannedUserId) {
+    throw new AppError('Could not identify customer from QR token.', 400, 'INVALID_CUSTOMER_QR');
+  }
+
+  const client = await pool.connect();
+  let updatedOrder;
+
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id, user_id, delivery_code
+       FROM orders WHERE id = $1 FOR UPDATE`,
+      [orderId],
+    );
+    const order = rows[0];
+    if (!order) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+
+    if (order.delivery_agent_id !== agent.id) {
+      throw new AppError('You are not assigned to this order.', 403, 'NOT_ASSIGNED_RIDER');
+    }
+
+    if (String(order.user_id) !== String(scannedUserId)) {
+      throw new AppError('Scanned QR code does not match the customer for this order.', 400, 'WRONG_CUSTOMER');
+    }
+
+    const proofJson = JSON.stringify(Array.isArray(proof) ? proof : []);
+
+    const { rows: updatedRows } = await client.query(
+      `UPDATE orders
+       SET delivery_requested_at = NOW(),
+           delivery_proof = $1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [proofJson, orderId],
+    );
+    updatedOrder = updatedRows[0];
+    await client.query('COMMIT');
+
+    // Notify customer to tap "I accepted the product"
+    safeSendNotification(
+      order.user_id,
+      'Delivery Arrived!',
+      `Rider has arrived with order #${order.delivery_code || orderId.slice(0, 8)}. Please confirm receipt in the app.`,
+      { orderId, type: 'DELIVERY_REQUESTED' },
+    );
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { verified: true, orderId, order: updatedOrder };
+}
+
+/**
+ * Rider's own dynamic QR: 5-minute encrypted AES-256-GCM token.
  */
 async function getAgentQr(rawCode) {
   const agent = await findAgent(rawCode);
@@ -208,4 +481,11 @@ async function getAgentQr(rawCode) {
 }
 
 module.exports = {
-  getAgentQr, listOffers, acceptOffer, declineOffer };
+  getAgentQr,
+  listOffers,
+  acceptOffer,
+  declineOffer,
+  getActiveDelivery,
+  confirmPickup,
+  scanDelivery,
+};

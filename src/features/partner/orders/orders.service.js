@@ -1,59 +1,15 @@
 const crypto = require('crypto');
 const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Schema (idempotent, runs once per process)
-//  - delivery_agents : registered delivery people. `agent_code` is the value
-//                      printed in the QR code of the agent's ID card.
-//  - orders.*        : delivery id, assigned agent and hand-over record.
-// ─────────────────────────────────────────────────────────────────────────────
-
-let schemaPromise = null;
-
-function ensureSchema() {
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS delivery_agents (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          agent_code VARCHAR(40) UNIQUE NOT NULL,
-          full_name VARCHAR(255) NOT NULL,
-          phone VARCHAR(30),
-          is_active BOOLEAN DEFAULT true,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_code VARCHAR(20)`);
-      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_agent_id UUID`);
-      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handed_over_at TIMESTAMP`);
-      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_code VARCHAR(20)`);
-      await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted_at TIMESTAMP`);
-      await pool.query(
-        `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_delivery_code
-         ON orders(delivery_code) WHERE delivery_code IS NOT NULL`,
-      );
-    })().catch((err) => {
-      schemaPromise = null; // retry on the next request
-      throw err;
-    });
-  }
-  return schemaPromise;
-}
+const {
+  ensureOrderFlowSchema,
+  maskPhone,
+  safeSendNotification,
+} = require('../../orders/order_flow');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** +251912345676 → +2519*****6 (the partner never receives the full number). */
-function maskPhone(raw) {
-  let d = String(raw || '').replace(/\D/g, '');
-  if (!d) return null;
-  if (d.startsWith('0') && d.length === 10) d = `251${d.slice(1)}`;
-  else if (!d.startsWith('251')) d = `251${d}`;
-  if (d.length < 6) return '***';
-  return `+${d.slice(0, 4)}*****${d.slice(-1)}`;
-}
 
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 function randomCode(prefix, length) {
@@ -124,7 +80,7 @@ async function loadItems(orderIds, partnerId) {
 
 /**
  * Single order shape sent to the partner app.
- * Deliberately has NO shipping address and NO full customer phone.
+ * Deliberately has NO customer detail (no name, no phone, no address).
  */
 function mapOrder(row, items = []) {
   return {
@@ -134,20 +90,28 @@ function mapOrder(row, items = []) {
     payment_method: row.payment_method || '',
     created_at: row.created_at,
     updated_at: row.updated_at,
-    customer_name: row.customer_name || 'Customer',
-    customer_phone: maskPhone(row.customer_phone),
+    // Step 2: Customer privacy — no name, no phone, no address sent to partner
+    customer_name: null,
+    customer_phone: null,
+    customer_address: null,
     item_count: items.length
       ? items.reduce((n, i) => n + i.quantity, 0)
       : Number(row.item_count) || 0,
     delivery_code: row.delivery_code || null,
     handover_code: row.handover_code || null,
     handed_over_at: row.handed_over_at || null,
+    handover_requested_at: row.handover_requested_at || null,
+    handover_proof: row.handover_proof || null,
+    delivery_requested_at: row.delivery_requested_at || null,
+    delivered_at: row.delivered_at || null,
+    payment_status: row.payment_status || 'PENDING',
+    // Step 4: When rider accepts, partner sees delivery person info
     delivery_agent: row.agent_code
       ? {
-          code: row.agent_code,
-          name: row.agent_name || '',
-          phone: maskPhone(row.agent_phone),
-        }
+        code: row.agent_code,
+        name: row.agent_name || '',
+        phone: maskPhone(row.agent_phone),
+      }
       : null,
     items,
   };
@@ -157,15 +121,15 @@ const ORDER_SELECT = `
   orders.id, orders.total_amount, orders.status, orders.payment_method,
   orders.created_at, orders.updated_at,
   orders.delivery_code, orders.handover_code, orders.handed_over_at,
-  COALESCE(u.full_name, 'Customer') AS customer_name,
-  u.phone AS customer_phone,
+  orders.handover_requested_at, orders.handover_proof,
+  orders.delivery_requested_at, orders.delivered_at, orders.customer_accepted_at,
+  orders.payment_status, orders.delivery_agent_id,
   da.agent_code, da.full_name AS agent_name, da.phone AS agent_phone`;
 
 const ORDER_JOINS = `
   FROM orders
   JOIN order_items ON order_items.order_id = orders.id
   JOIN products ON products.id = order_items.product_id
-  LEFT JOIN users u ON u.id = orders.user_id
   LEFT JOIN delivery_agents da ON da.id = orders.delivery_agent_id`;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +137,7 @@ const ORDER_JOINS = `
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function getOrders(partnerId, { page = 1, limit = 50, status } = {}) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const offset = (page - 1) * limit;
   const countParams = [partnerId];
   let statusClause = '';
@@ -199,7 +163,7 @@ async function getOrders(partnerId, { page = 1, limit = 50, status } = {}) {
               COALESCE(SUM(order_items.quantity), 1)::int AS item_count
        ${ORDER_JOINS}
        WHERE products.partner_id = $1 ${statusClause}
-       GROUP BY orders.id, u.id, da.id
+       GROUP BY orders.id, da.id
        ORDER BY orders.created_at DESC
        LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
       queryParams,
@@ -220,7 +184,7 @@ async function fetchOrder(partnerId, orderId) {
     `SELECT ${ORDER_SELECT}
      ${ORDER_JOINS}
      WHERE orders.id = $1 AND products.partner_id = $2
-     GROUP BY orders.id, u.id, da.id`,
+     GROUP BY orders.id, da.id`,
     [orderId, partnerId],
   );
   if (rows.length === 0) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
@@ -229,26 +193,15 @@ async function fetchOrder(partnerId, orderId) {
 }
 
 async function getOrder(partnerId, orderId) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   return fetchOrder(partnerId, orderId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Status changes made by the partner
-//    New → Accept (CONFIRMED) or Reject (CANCELLED) → PACKED
-//    PACKED → SHIPPED happens ONLY through the hand-over (scan) endpoints.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PARTNER_ALLOWED_STATUSES = ['CONFIRMED', 'PACKED', 'CANCELLED'];
-
-const PARTNER_TRANSITIONS = {
-  PENDING:    ['CONFIRMED', 'CANCELLED'],
-  PAID:       ['CONFIRMED', 'CANCELLED'],
-  PLACED:     ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED:  ['PACKED', 'CANCELLED'],
-  PROCESSING: ['PACKED', 'CANCELLED'],
-  PACKED:     ['CANCELLED'],
-};
+const PARTNER_ALLOWED_STATUSES = ['CONFIRMED', 'PACKED'];
 
 async function lockPartnerOrder(client, partnerId, orderId) {
   const { rows } = await client.query(
@@ -268,19 +221,29 @@ async function lockPartnerOrder(client, partnerId, orderId) {
 }
 
 async function updateStatus(partnerId, orderId, status) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const next = String(status || '').toUpperCase();
+
+  // Step 1: Partner cannot reject or cancel
+  if (next === 'CANCELLED' || next === 'REJECTED') {
+    throw new AppError(
+      'Partners cannot reject confirmed orders.',
+      403,
+      'PARTNER_CANNOT_REJECT',
+    );
+  }
 
   if (next === 'SHIPPED' || next === 'IN_TRANSIT') {
     throw new AppError(
-      'Use "Out from the shop" and scan the delivery person ID to hand the order over.',
+      'Use "Pick up" and scan the delivery person ID to hand the order over.',
       400,
       'USE_HANDOVER',
     );
   }
+
   if (!PARTNER_ALLOWED_STATUSES.includes(next)) {
     throw new AppError(
-      `Invalid status. Allowed values: ${PARTNER_ALLOWED_STATUSES.join(', ')}.`,
+      `Invalid status. Partner can only mark orders as PACKED.`,
       400,
       'INVALID_STATUS',
     );
@@ -290,21 +253,10 @@ async function updateStatus(partnerId, orderId, status) {
   try {
     await client.query('BEGIN');
     const order = await lockPartnerOrder(client, partnerId, orderId);
-    const prev = String(order.status || '').toUpperCase();
-    const allowed = PARTNER_TRANSITIONS[prev] || [];
-    if (!allowed.includes(next)) {
-      throw new AppError(
-        `Cannot move order from ${prev} to ${next}.`,
-        400,
-        'INVALID_STATUS_TRANSITION',
-      );
-    }
     await client.query(
       `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
       [next, orderId],
     );
-    // The delivery id is created as soon as the partner accepts the order.
-    if (next === 'CONFIRMED') await ensureDeliveryCode(client, orderId);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -317,7 +269,7 @@ async function updateStatus(partnerId, orderId, status) {
 
 /** Partner picks how the customer pays (cash, telebirr, bank, ...). */
 async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
-  await ensureSchema();
+  await ensureOrderFlowSchema();
   const method = String(paymentMethod || '').trim();
   if (!method) {
     throw new AppError('paymentMethod is required.', 400, 'MISSING_FIELDS');
@@ -341,7 +293,7 @@ async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Hand-over to the delivery person ("Out from the shop")
+//  Hand-over to the delivery person
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function findAgent(client, rawCode) {
@@ -360,63 +312,89 @@ async function findAgent(client, rawCode) {
   return agent;
 }
 
-/** Step 1 — after scanning: shows who is collecting what. Changes nothing. */
+/**
+ * Step 5b — Partner scans rider QR.
+ * Backend verifies that this is the same rider who accepted THIS order.
+ */
 async function previewHandover(partnerId, orderId, agentCode) {
-  await ensureSchema();
-  const order = await fetchOrder(partnerId, orderId);
-  if (String(order.status).toUpperCase() !== 'PACKED') {
-    throw new AppError(
-      'Only packed orders can be handed to a delivery person.',
-      400,
-      'ORDER_NOT_PACKED',
-    );
-  }
+  await ensureOrderFlowSchema();
   const client = await pool.connect();
   try {
+    const order = await lockPartnerOrder(client, partnerId, orderId);
     const agent = await findAgent(client, agentCode);
+
+    if (!order.delivery_agent_id) {
+      throw new AppError('No delivery person has accepted this order yet.', 400, 'NO_RIDER_YET');
+    }
+
+    if (order.delivery_agent_id !== agent.id) {
+      throw new AppError('Scanned rider does not match the assigned rider for this order.', 400, 'WRONG_RIDER');
+    }
+
+    const fullOrder = await fetchOrder(partnerId, orderId);
     return {
       agent: { code: agent.agent_code, name: agent.full_name, phone: maskPhone(agent.phone) },
-      order,
+      order: fullOrder,
     };
   } finally {
     client.release();
   }
 }
 
-/** Step 2 — partner confirms: order becomes SHIPPED and a hand-over id is issued. */
-async function confirmHandover(partnerId, orderId, agentCode) {
-  await ensureSchema();
+/**
+ * Step 5c — Partner confirms handover with photo/video proofs.
+ * Status remains PACKED (or moves CONFIRMED -> PACKED).
+ * handover_requested_at is set, proof is stored.
+ * Screen shows "Waiting for rider to confirm".
+ */
+async function confirmHandover(partnerId, orderId, agentCode, proof = []) {
+  await ensureOrderFlowSchema();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const order = await lockPartnerOrder(client, partnerId, orderId);
     const agent = await findAgent(client, agentCode);
-    const current = String(order.status || '').toUpperCase();
 
-    // Already handed over to this same person → just return the record.
-    if (current === 'SHIPPED' && order.delivery_agent_id === agent.id) {
-      await client.query('COMMIT');
-      return fetchOrder(partnerId, orderId);
+    if (!order.delivery_agent_id) {
+      throw new AppError('No delivery person has accepted this order yet.', 400, 'NO_RIDER_YET');
     }
-    if (current !== 'PACKED') {
-      throw new AppError(
-        'Only packed orders can be handed to a delivery person.',
-        400,
-        'ORDER_NOT_PACKED',
-      );
+
+    if (order.delivery_agent_id !== agent.id) {
+      throw new AppError('Scanned rider does not match the assigned rider for this order.', 400, 'WRONG_RIDER');
     }
 
     await ensureDeliveryCode(client, orderId);
 
     const handoverCode = randomCode('H', 6);
+    const proofJson = JSON.stringify(Array.isArray(proof) ? proof : []);
+
     await client.query(
       `UPDATE orders
-       SET status = 'SHIPPED', delivery_agent_id = $1, handed_over_at = NOW(),
-           handover_code = $2, delivery_accepted_at = NULL, updated_at = NOW()
+       SET status = 'PACKED',
+           handover_code = $1,
+           handover_requested_at = NOW(),
+           handover_proof = $2,
+           updated_at = NOW()
        WHERE id = $3`,
-      [agent.id, handoverCode, orderId],
+      [handoverCode, proofJson, orderId],
     );
     await client.query('COMMIT');
+
+    // Notify Rider
+    const { rows: userAgentRows } = await pool.query(
+      `SELECT u.id AS user_id FROM delivery_agents da
+       JOIN users u ON u.phone = da.phone
+       WHERE da.id = $1`,
+      [agent.id],
+    );
+    if (userAgentRows[0]) {
+      safeSendNotification(
+        userAgentRows[0].user_id,
+        'Handover Ready',
+        'Partner has packed the order and requested handover. Please confirm receipt.',
+        { orderId, type: 'HANDOVER_REQUESTED' }
+      );
+    }
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

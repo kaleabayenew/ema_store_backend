@@ -97,6 +97,26 @@ const getOrderById = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/orders/pending-receipt
+const getPendingReceipt = async (req, res, next) => {
+  try {
+    const result = await service.getPendingReceipt(req.user.id);
+    ok(res, { order: result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── POST /api/v1/orders/:id/receive
+const receiveOrder = async (req, res, next) => {
+  try {
+    const order = await service.receiveOrder(req.user.id, req.params.id);
+    ok(res, { order, received: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createOrder,
   getUserOrders,
@@ -104,4 +124,6 @@ module.exports = {
   getAdminOrderById,
   updateStatus,
   getOrderById,
+  getPendingReceipt,
+  receiveOrder,
 };

@@ -69,12 +69,18 @@ const scanHandover = async (req, res, next) => {
   }
 };
 
-// Step 2: partner confirms → order SHIPPED, hand-over ID issued.
+// Step 2: partner confirms → saves proof, sets handover_requested_at, notifies rider
 const confirmHandover = async (req, res, next) => {
   try {
-    const { agentCode } = req.body || {};
+    const { agentCode, proof, handover_proof } = req.body || {};
     if (!agentCode) return error(res, 'agentCode is required.', 400, 'MISSING_FIELDS');
-    const order = await service.confirmHandover(req.user.id, req.params.id, resolveAgentCode(agentCode));
+    const proofData = proof || handover_proof || [];
+    const order = await service.confirmHandover(
+      req.user.id,
+      req.params.id,
+      resolveAgentCode(agentCode),
+      proofData,
+    );
     ok(res, { order });
   } catch (err) {
     next(err);

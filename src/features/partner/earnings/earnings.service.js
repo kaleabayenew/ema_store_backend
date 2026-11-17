@@ -4,7 +4,7 @@ const { AppError } = require('../../../core/errors/app_error');
 async function getEarnings(partnerId) {
   // Execute all earnings queries in parallel
   const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes] = await Promise.all([
-    // Total revenue from completed order items
+    // Total revenue from completed/delivered order items
     pool.query(
       `SELECT COALESCE(SUM(
          ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
@@ -12,7 +12,7 @@ async function getEarnings(partnerId) {
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
        JOIN orders o ON o.id = oi.order_id
-       WHERE p.partner_id = $1 AND o.status = 'COMPLETED'`,
+       WHERE p.partner_id = $1 AND o.status IN ('DELIVERED', 'COMPLETED')`,
       [partnerId],
     ),
     // This month
@@ -24,7 +24,7 @@ async function getEarnings(partnerId) {
        JOIN products p ON p.id = oi.product_id
        JOIN orders o ON o.id = oi.order_id
        WHERE p.partner_id = $1
-         AND o.status = 'COMPLETED'
+         AND o.status IN ('DELIVERED', 'COMPLETED')
          AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())`,
       [partnerId],
     ),
@@ -37,7 +37,7 @@ async function getEarnings(partnerId) {
        JOIN products p ON p.id = oi.product_id
        JOIN orders o ON o.id = oi.order_id
        WHERE p.partner_id = $1
-         AND o.status = 'COMPLETED'
+         AND o.status IN ('DELIVERED', 'COMPLETED')
          AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')`,
       [partnerId],
     ),
@@ -59,7 +59,7 @@ async function getEarnings(partnerId) {
        JOIN products p ON p.id = oi.product_id
        JOIN orders o ON o.id = oi.order_id
        WHERE p.partner_id = $1
-         AND o.status = 'COMPLETED'
+         AND o.status IN ('DELIVERED', 'COMPLETED')
          AND o.created_at >= NOW() - INTERVAL '4 weeks'
        GROUP BY week_start
        ORDER BY week_start ASC`,

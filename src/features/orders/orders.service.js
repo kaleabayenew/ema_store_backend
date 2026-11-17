@@ -1,5 +1,10 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
+const {
+  ensureOrderFlowSchema,
+  generateDeliveryCode,
+  safeSendNotification,
+} = require('./order_flow');
 
 // ============================================================================
 // ORDERS SERVICE
@@ -9,6 +14,7 @@ const { AppError } = require('../../core/errors/app_error');
 // ── Create Order from Cart or Direct Items ─────────────────────────────────
 
 async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null, couponCode = null } = {}) {
+  await ensureOrderFlowSchema();
   // Idempotent replay: a retried checkout (e.g. after a client timeout)
   // returns the original order instead of charging/creating twice.
   if (idempotencyKey) {
@@ -153,7 +159,7 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // 'BALANCE' → total is the ETB order total charged from users.balance.
     const walletPayment = paymentMethod === 'COINS' ? 'COINS'
       : (paymentMethod === 'BALANCE' || paymentMethod === 'WALLET_BALANCE') ? 'BALANCE'
-      : null;
+        : null;
 
     let coinsTotal = 0;
     let coinsPerUnit = 100;
@@ -192,13 +198,17 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       }
     }
 
-    // Create order (wallet-paid orders start as PAID)
-    const orderStatus = walletPayment ? 'PAID' : 'PENDING';
+    // Step 1: Customer buys/orders the product -> order is CONFIRMED automatically,
+    // delivery_code is generated, and payment_status is initialized.
+    const orderStatus = 'CONFIRMED';
+    const paymentStatus = walletPayment ? 'PAID' : 'PENDING';
+    const deliveryCode = generateDeliveryCode();
+
     const { rows: orderRows } = await client.query(`
-      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents, delivery_code, payment_status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents, deliveryCode, paymentStatus]);
 
     const order = orderRows[0];
 
@@ -304,11 +314,24 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
       o.updated_at,
       o.total_cents,
       COALESCE(o.total_amount, o.total_cents / 100.0) AS total_amount,
-      COUNT(oi.id)::int AS item_count
+      COUNT(oi.id)::int AS item_count,
+      o.delivery_code,
+      o.delivery_agent_id,
+      o.handed_over_at,
+      o.delivery_accepted_at,
+      o.handover_requested_at,
+      o.delivery_requested_at,
+      o.delivered_at,
+      o.customer_accepted_at,
+      o.payment_status,
+      da.full_name AS delivery_agent_name,
+      da.phone AS delivery_agent_phone,
+      da.agent_code AS delivery_agent_code
     FROM orders o
     LEFT JOIN order_items oi ON o.id = oi.order_id
+    LEFT JOIN delivery_agents da ON da.id = o.delivery_agent_id
     WHERE o.user_id = $1
-    GROUP BY o.id
+    GROUP BY o.id, da.id
     ORDER BY o.created_at DESC
     LIMIT $2 OFFSET $3
   `, [userId, limit, offset]);
@@ -371,6 +394,18 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
     total_cents: r.total_cents ?? Math.round(parseFloat(r.total_amount ?? 0) * 100),
     total_amount: parseFloat(r.total_amount ?? 0),
     item_count: r.item_count,
+    delivery_code: r.delivery_code || null,
+    delivery_agent_id: r.delivery_agent_id || null,
+    delivery_agent_name: r.delivery_agent_name || null,
+    delivery_agent_phone: r.delivery_agent_phone || null,
+    delivery_agent_code: r.delivery_agent_code || null,
+    handover_requested_at: r.handover_requested_at || null,
+    delivery_requested_at: r.delivery_requested_at || null,
+    delivered_at: r.delivered_at || null,
+    customer_accepted_at: r.customer_accepted_at || null,
+    payment_status: r.payment_status || 'PENDING',
+    handed_over_at: r.handed_over_at || null,
+    delivery_accepted_at: r.delivery_accepted_at || null,
     items: itemsByOrder[r.id] || [],
   }));
 }
@@ -476,18 +511,18 @@ const ORDER_STATUSES = new Set([
 
 // Mirrors the admin panel's transition rules — terminal states are final.
 const ALLOWED_TRANSITIONS = {
-  PENDING:          ['CONFIRMED', 'CANCELLED'],
-  PENDING_PAYMENT:  ['PAID', 'CANCELLED'],
-  PAID:             ['CONFIRMED', 'PROCESSING', 'CANCELLED'],
-  PLACED:           ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED:        ['PROCESSING', 'PACKED', 'CANCELLED'],
-  PROCESSING:       ['PACKED', 'CANCELLED'],
-  PACKED:           ['SHIPPED', 'CANCELLED'],
-  SHIPPED:          ['IN_TRANSIT', 'DELIVERED'],
-  IN_TRANSIT:       ['DELIVERED'],
-  DELIVERED:        [],
-  CANCELLED:        [],
-  REFUNDED:         [],
+  PENDING: ['CONFIRMED', 'CANCELLED'],
+  PENDING_PAYMENT: ['PAID', 'CANCELLED'],
+  PAID: ['CONFIRMED', 'PROCESSING', 'CANCELLED'],
+  PLACED: ['CONFIRMED', 'CANCELLED'],
+  CONFIRMED: ['PROCESSING', 'PACKED', 'CANCELLED'],
+  PROCESSING: ['PACKED', 'CANCELLED'],
+  PACKED: ['SHIPPED', 'CANCELLED'],
+  SHIPPED: ['IN_TRANSIT', 'DELIVERED'],
+  IN_TRANSIT: ['DELIVERED'],
+  DELIVERED: [],
+  CANCELLED: [],
+  REFUNDED: [],
 };
 
 async function updateOrderStatus(orderId, status) {
@@ -549,10 +584,23 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       COALESCE(o.total_amount, o.total_cents / 100.0)   AS total_amount,
       COALESCE(cu.full_name, u.phone, 'Customer')        AS customer_name,
       u.phone                                             AS customer_phone,
-      u.email                                             AS customer_email
+      u.email                                             AS customer_email,
+      o.delivery_code,
+      o.delivery_agent_id,
+      o.handed_over_at,
+      o.delivery_accepted_at,
+      o.handover_requested_at,
+      o.delivery_requested_at,
+      o.delivered_at,
+      o.customer_accepted_at,
+      o.payment_status,
+      da.full_name AS delivery_agent_name,
+      da.phone AS delivery_agent_phone,
+      da.agent_code AS delivery_agent_code
     FROM orders o
     LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN customer_user cu ON cu.user_id = o.user_id
+    LEFT JOIN delivery_agents da ON da.id = o.delivery_agent_id
     WHERE o.id = $1
     ${userId ? 'AND o.user_id = $2' : ''}
   `;
@@ -625,6 +673,18 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
     updated_at: row.updated_at,
     total_cents: row.total_cents ?? Math.round(parseFloat(row.total_amount ?? 0) * 100),
     total_amount: parseFloat(row.total_amount ?? 0),
+    delivery_code: row.delivery_code || null,
+    delivery_agent_id: row.delivery_agent_id || null,
+    delivery_agent_name: row.delivery_agent_name || null,
+    delivery_agent_phone: row.delivery_agent_phone || null,
+    delivery_agent_code: row.delivery_agent_code || null,
+    handover_requested_at: row.handover_requested_at || null,
+    delivery_requested_at: row.delivery_requested_at || null,
+    delivered_at: row.delivered_at || null,
+    customer_accepted_at: row.customer_accepted_at || null,
+    payment_status: row.payment_status || 'PENDING',
+    handed_over_at: row.handed_over_at || null,
+    delivery_accepted_at: row.delivery_accepted_at || null,
     items: itemRows.map((i) => ({
       id: i.id,
       order_id: i.order_id,
@@ -642,10 +702,127 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
   };
 }
 
+// ── Customer Pending Receipt & Confirmation ──────────────────────────────
+
+async function getPendingReceipt(userId) {
+  await ensureOrderFlowSchema();
+  const { rows } = await pool.query(
+    `SELECT o.id, o.status, o.total_amount, o.total_cents, o.delivery_code,
+            o.delivery_requested_at, o.delivery_proof, o.created_at,
+            da.full_name AS delivery_agent_name, da.phone AS delivery_agent_phone,
+            da.agent_code AS delivery_agent_code
+     FROM orders o
+     LEFT JOIN delivery_agents da ON da.id = o.delivery_agent_id
+     WHERE o.user_id = $1
+       AND o.delivery_requested_at IS NOT NULL
+       AND o.customer_accepted_at IS NULL
+       AND o.status != 'CANCELLED'
+     ORDER BY o.delivery_requested_at DESC
+     LIMIT 1`,
+    [userId],
+  );
+  if (rows.length === 0) return null;
+  const order = rows[0];
+  return {
+    id: order.id,
+    orderNumber: String(order.delivery_code || order.id).slice(0, 8).toUpperCase(),
+    totalAmount: Number(order.total_amount) || (order.total_cents ? order.total_cents / 100 : 0),
+    deliveryCode: order.delivery_code,
+    deliveryRequestedAt: order.delivery_requested_at,
+    deliveryProof: order.delivery_proof,
+    deliveryAgent: order.delivery_agent_code ? {
+      name: order.delivery_agent_name,
+      phone: order.delivery_agent_phone,
+      code: order.delivery_agent_code,
+    } : null,
+  };
+}
+
+async function receiveOrder(userId, orderId) {
+  await ensureOrderFlowSchema();
+  const client = await pool.connect();
+  let updatedOrder;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT o.id, o.status, o.user_id, o.delivery_agent_id, o.delivery_requested_at, o.delivery_code
+       FROM orders o
+       WHERE o.id = $1 AND o.user_id = $2
+       FOR UPDATE`,
+      [orderId, userId],
+    );
+    const order = rows[0];
+    if (!order) {
+      throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    }
+    if (!order.delivery_requested_at) {
+      throw new AppError('Delivery has not been requested for this order yet.', 400, 'DELIVERY_NOT_REQUESTED');
+    }
+
+    const { rows: updateRows } = await client.query(
+      `UPDATE orders
+       SET status = 'DELIVERED',
+           delivered_at = NOW(),
+           customer_accepted_at = NOW(),
+           payment_status = 'PAID',
+           paid_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [orderId],
+    );
+    updatedOrder = updateRows[0];
+    await client.query('COMMIT');
+
+    // Notify Partner
+    const { rows: partnerRows } = await pool.query(
+      `SELECT DISTINCT p.partner_id
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1`,
+      [orderId],
+    );
+    for (const pr of partnerRows) {
+      safeSendNotification(
+        pr.partner_id,
+        'Order Delivered & Paid!',
+        `Order #${order.delivery_code || order.id.slice(0, 8)} was accepted by the customer and payment is settled.`,
+        { orderId, type: 'ORDER_DELIVERED' }
+      );
+    }
+
+    // Notify Rider if assigned
+    if (order.delivery_agent_id) {
+      const { rows: agentRows } = await pool.query(
+        `SELECT u.id AS user_id FROM delivery_agents da
+         JOIN users u ON u.phone = da.phone
+         WHERE da.id = $1`,
+        [order.delivery_agent_id],
+      );
+      if (agentRows[0]) {
+        safeSendNotification(
+          agentRows[0].user_id,
+          'Delivery Completed!',
+          `Customer accepted order #${order.delivery_code || order.id.slice(0, 8)}. Great job!`,
+          { orderId, type: 'DELIVERY_COMPLETED' }
+        );
+      }
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return updatedOrder;
+}
+
 module.exports = {
   createOrder,
   getUserOrders,
   getAllOrders,
   updateOrderStatus,
   getOrderById,
+  getPendingReceipt,
+  receiveOrder,
 };
