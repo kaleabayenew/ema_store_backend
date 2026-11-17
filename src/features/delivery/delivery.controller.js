@@ -39,6 +39,17 @@ const declineOffer = async (req, res, next) => {
   }
 };
 
+const getHistory = async (req, res, next) => {
+  try {
+    const result = await service.getDeliveryHistory(agentCode(req), {
+      limit: req.query.limit,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getActiveDelivery = async (req, res, next) => {
   try {
     const result = await service.getActiveDelivery(agentCode(req));
@@ -76,6 +87,7 @@ module.exports = {
   acceptOffer,
   declineOffer,
   getActiveDelivery,
+  getHistory,
   confirmPickup,
   scanDelivery,
 };

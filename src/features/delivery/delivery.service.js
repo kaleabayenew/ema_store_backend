@@ -303,6 +303,7 @@ async function getActiveDelivery(rawCode) {
     handedOverAt: r.handed_over_at,
     deliveryRequestedAt: r.delivery_requested_at,
     deliveryProof: r.delivery_proof,
+    deliveredAt: r.delivered_at,
     // Step 4: Unredacted details visible to assigned rider
     customerName: r.customer_name || 'Customer',
     customerPhone: r.customer_phone || null,
@@ -466,6 +467,84 @@ async function scanDelivery(rawCode, orderId, { customerQrToken, proof = [] }) {
 }
 
 /**
+ * Past deliveries for this agent: orders they collected that are finished
+ * (delivered, or cancelled after hand-over). Powers the rider app's
+ * "My Orders" history tab.
+ */
+async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+  const max = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+  const { rows } = await pool.query(
+    `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
+            o.delivery_code, o.status, o.created_at, o.updated_at,
+            o.delivery_accepted_at, o.handed_over_at, o.delivered_at,
+            o.delivery_requested_at, o.customer_accepted_at,
+            u.full_name AS customer_name, u.phone AS customer_phone,
+            shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
+     FROM orders o
+     JOIN users u ON u.id = o.user_id
+     LEFT JOIN LATERAL (
+       SELECT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = o.id
+       LIMIT 1
+     ) sp ON true
+     LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+     WHERE o.delivery_agent_id = $1
+       AND (o.delivered_at IS NOT NULL OR o.status IN ('DELIVERED', 'CANCELLED'))
+     ORDER BY COALESCE(o.delivered_at, o.updated_at, o.created_at) DESC
+     LIMIT $2`,
+    [agent.id, max],
+  );
+
+  const orderIds = rows.map((r) => r.id);
+  const itemsByOrder = {};
+  if (orderIds.length > 0) {
+    const { rows: itemRows } = await pool.query(
+      `SELECT oi.order_id, p.name_en AS name, oi.quantity
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = ANY($1::uuid[])
+       ORDER BY oi.created_at`,
+      [orderIds],
+    );
+    for (const r of itemRows) {
+      (itemsByOrder[r.order_id] ||= []).push({
+        name: r.name || 'Product',
+        quantity: Number(r.quantity) || 0,
+      });
+    }
+  }
+
+  return {
+    agent: { code: agent.agent_code, name: agent.full_name },
+    history: rows.map((r) => ({
+      id: r.id,
+      orderNumber: r.delivery_code || String(r.id).slice(0, 8).toUpperCase(),
+      totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
+      paymentMethod: r.payment_method || '',
+      shippingAddress: r.shipping_address || '',
+      deliveryCode: r.delivery_code || null,
+      status: r.status,
+      createdAt: r.created_at,
+      deliveryAcceptedAt: r.delivery_accepted_at,
+      handedOverAt: r.handed_over_at,
+      deliveredAt: r.delivered_at,
+      deliveryRequestedAt: r.delivery_requested_at,
+      customerAcceptedAt: r.customer_accepted_at,
+      customerName: r.customer_name || 'Customer',
+      customerPhone: r.customer_phone || null,
+      shopName: r.shop_name || 'Ema Store Partner',
+      shopAddress: r.shop_address || '',
+      shopPhone: r.shop_phone || null,
+      items: itemsByOrder[r.id] || [],
+    })),
+  };
+}
+
+/**
  * Rider's own dynamic QR: 5-minute encrypted AES-256-GCM token.
  */
 async function getAgentQr(rawCode) {
@@ -488,4 +567,5 @@ module.exports = {
   getActiveDelivery,
   confirmPickup,
   scanDelivery,
+  getDeliveryHistory,
 };
