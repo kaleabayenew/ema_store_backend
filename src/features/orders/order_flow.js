@@ -31,6 +31,7 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_requested_at TIMESTAMP WITH TIME ZONE`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_proof JSONB`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_requested_at TIMESTAMP WITH TIME ZONE`);
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_arrived_at TIMESTAMP WITH TIME ZONE`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_proof JSONB`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP WITH TIME ZONE`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_accepted_at TIMESTAMP WITH TIME ZONE`);
