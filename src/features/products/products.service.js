@@ -153,10 +153,12 @@ async function getAllProducts({
     paramIndex++;
   }
 
-  if (status) {
+  if (status && status !== 'ALL' && status !== 'all') {
     where += ` AND p.status = $${paramIndex}`;
     params.push(status);
     paramIndex++;
+  } else if (!status) {
+    where += ` AND (p.status = 'APPROVED' OR p.status IS NULL) AND p.is_visible IS NOT FALSE`;
   }
 
   if (partnerId) {
