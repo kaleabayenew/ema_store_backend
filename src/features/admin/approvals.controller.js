@@ -19,14 +19,26 @@ const getApprovals = async (req, res, next) => {
     `);
 
     const products = await pool.query(`
-      SELECT p.id, p.name_en, p.price_cents, p.stock, p.status, p.category,
-             p.image_url, p.created_at,
-             pp.business_name AS partner_name, pp.owner_name AS partner_owner,
-             u.email AS partner_email
+      SELECT p.id,
+             COALESCE(p.name_en, p.name, 'Product') AS name_en,
+             COALESCE(p.description_en, p.description, '') AS description_en,
+             COALESCE(p.price_cents, CAST(p.price * 100 AS INTEGER), 0) AS price_cents,
+             COALESCE(p.stock, p.stock_quantity, 0) AS stock,
+             p.status,
+             COALESCE(c.name_en, p.category, 'General') AS category,
+             COALESCE(
+               p.image_url,
+               (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_primary DESC, sort_order ASC, created_at ASC LIMIT 1)
+             ) AS image_url,
+             p.created_at,
+             COALESCE(pp.shop_name, pp.business_name, pp.owner_name, u.full_name, 'Partner') AS partner_name,
+             COALESCE(pp.owner_name, u.full_name, '—') AS partner_owner,
+             COALESCE(pp.email, u.email, u.phone) AS partner_email
       FROM products p
+      LEFT JOIN categories c ON (p.category = c.slug OR p.category = c.id::text OR LOWER(p.category) = LOWER(c.name_en))
       LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
       LEFT JOIN users u ON u.id = p.partner_id
-      WHERE p.status = 'PENDING'
+      WHERE UPPER(COALESCE(p.status, 'PENDING')) = 'PENDING'
       ORDER BY p.created_at ASC
     `);
 
@@ -74,22 +86,24 @@ function mapPartner(r) {
 }
 
 function mapProduct(r) {
+  const price = r.price_cents != null ? r.price_cents / 100 : null;
   return {
     id: r.id,
     userId: null,
     type: 'PRODUCT',
     name: r.name_en || 'Product',
-    submittedBy: r.partner_name || r.partner_owner || '—',
+    submittedBy: r.partner_name || r.partner_owner || 'Partner',
     submittedAt: r.created_at,
     email: r.partner_email || null,
     category: r.category || null,
-    price: r.price_cents != null ? r.price_cents / 100 : null,
+    price,
     stock: r.stock ?? null,
     imageUrl: r.image_url || null,
     detail: {
       name: r.name_en || null,
+      description: r.description_en || null,
       category: r.category || null,
-      price: r.price_cents != null ? r.price_cents / 100 : null,
+      price,
       stock: r.stock ?? null,
       imageUrl: r.image_url || null,
       partnerName: r.partner_name || null,
@@ -167,9 +181,15 @@ const reviewApproval = async (req, res, next) => {
       displayName = p.name_en || 'Product';
       emailTo = p.partner_email || null;
 
+      const isApprove = action === 'approve';
       await pool.query(
-        `UPDATE products SET status = $1, updated_at = NOW() WHERE id = $2`,
-        [action === 'approve' ? 'APPROVED' : 'REJECTED', id]);
+        `UPDATE products
+         SET status = $1,
+             is_active = $2,
+             is_visible = $3,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [isApprove ? 'APPROVED' : 'REJECTED', isApprove, isApprove, id]);
     }
 
     if (emailTo) {

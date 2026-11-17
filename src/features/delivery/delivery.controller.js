@@ -12,6 +12,15 @@ const listOffers = async (req, res, next) => {
   }
 };
 
+const getQr = async (req, res, next) => {
+  try {
+    const result = await service.getAgentQr(agentCode(req));
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const acceptOffer = async (req, res, next) => {
   try {
     const result = await service.acceptOffer(agentCode(req), req.params.orderId);
@@ -30,4 +39,4 @@ const declineOffer = async (req, res, next) => {
   }
 };
 
-module.exports = { listOffers, acceptOffer, declineOffer };
+module.exports = { getQr, listOffers, acceptOffer, declineOffer };

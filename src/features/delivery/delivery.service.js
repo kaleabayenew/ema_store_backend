@@ -1,5 +1,6 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
+const { encryptAgentCode } = require('./agent_qr');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Delivery-agent offers
@@ -190,4 +191,21 @@ async function declineOffer(rawCode, orderId) {
   return { declined: true, orderId };
 }
 
-module.exports = { listOffers, acceptOffer, declineOffer };
+/**
+ * Rider's own QR: returns the short agent id (shown under the QR) and an
+ * AES-256-GCM encrypted, 5-minute token (the QR itself).
+ */
+async function getAgentQr(rawCode) {
+  const agent = await findAgent(rawCode);
+  const { token, expiresInSeconds, expiresAt } = encryptAgentCode(agent.agent_code);
+  return {
+    agentCode: agent.agent_code,
+    token,
+    expiresInSeconds,
+    expiresAt,
+    agent: { code: agent.agent_code, name: agent.full_name },
+  };
+}
+
+module.exports = {
+  getAgentQr, listOffers, acceptOffer, declineOffer };

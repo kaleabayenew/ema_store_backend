@@ -1,4 +1,4 @@
-﻿const { pool } = require('../../../core/config/database');
+const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,10 +207,11 @@ async function createProduct(partnerId, data) {
 
     const { rows } = await client.query(
       `INSERT INTO products
-         (partner_id, category, brand_id, name_en, name_am, name_om,
-          description_en, description_am, description_om, delivery_info,
-          price_cents, discount_cents, sku, stock, status, is_visible)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'PENDING',$15)
+         (partner_id, category, brand_id, name, name_en, name_am, name_om,
+          description, description_en, description_am, description_om, delivery_info,
+          price, price_cents, discount_cents, sku, stock, stock_quantity,
+          status, is_visible, is_active, image_url)
+       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,'PENDING',$16,false,$17)
        RETURNING *`,
       [
         partnerId, category, data.brandId ?? null,
@@ -218,8 +219,9 @@ async function createProduct(partnerId, data) {
         data.description ?? data.descriptionEn ?? null,
         data.descriptionAm ?? null, data.descriptionOm ?? null,
         data.deliveryInfo ?? null,
+        priceCents != null ? priceCents / 100 : 0,
         priceCents, discountCents, data.sku ?? null,
-        stock ?? 0, visible,
+        stock ?? 0, visible, imageUrls[0] || null,
       ],
     );
     const productId = rows[0].id;
