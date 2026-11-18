@@ -1499,6 +1499,9 @@ app.use('/api/v1/partner/settings', partnerSettingsRouter);
 const deliveryRouter = require('./features/delivery/delivery.router');
 app.use('/api/v1/delivery', deliveryRouter);
 
+const agentAuthRouter = require('./features/agent_auth/agent_auth.router');
+app.use('/api/v1/agent-auth', agentAuthRouter);
+
 // ── Proof upload & serving routes ─────────────────────────────────────────────
 const proofRouter = require('./features/proof/proof.router');
 app.use('/api/v1/proof', proofRouter);
