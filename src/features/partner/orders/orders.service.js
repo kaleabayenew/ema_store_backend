@@ -104,6 +104,7 @@ function mapOrder(row, items = []) {
     handover_requested_at: row.handover_requested_at || null,
     handover_proof: row.handover_proof || null,
     delivery_requested_at: row.delivery_requested_at || null,
+    customer_rejected_at: row.customer_rejected_at || null,
     delivered_at: row.delivered_at || null,
     payment_status: row.payment_status || 'PENDING',
     // Step 4: When rider accepts, partner sees delivery person info
@@ -123,7 +124,7 @@ const ORDER_SELECT = `
   orders.created_at, orders.updated_at,
   orders.delivery_code, orders.handover_code, orders.handed_over_at,
   orders.handover_requested_at, orders.handover_proof,
-  orders.delivery_requested_at, orders.delivered_at, orders.customer_accepted_at,
+  orders.delivery_requested_at, orders.delivered_at, orders.customer_accepted_at, orders.customer_rejected_at,
   orders.payment_status, orders.delivery_agent_id,
   da.agent_code, da.full_name AS agent_name, da.phone AS agent_phone`;
 
