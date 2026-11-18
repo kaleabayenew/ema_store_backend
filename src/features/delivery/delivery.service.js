@@ -414,9 +414,21 @@ async function scanDelivery(rawCode, orderId, { customerQrToken, proof = [] }) {
     throw new AppError('Customer QR token is required.', 400, 'QR_TOKEN_REQUIRED');
   }
 
-  // Decrypt and verify dynamic customer token
-  const decrypted = decryptDynamicToken(customerQrToken);
-  const scannedUserId = decrypted.userId || decrypted.sub || decrypted.id;
+  // Decrypt and verify dynamic customer token. If the rider typed the
+  // customer's 5-minute display ID instead of scanning the QR, resolve
+  // it through user_qr_display_codes.
+  let scannedUserId = null;
+  try {
+    const decrypted = decryptDynamicToken(customerQrToken);
+    scannedUserId = decrypted.userId || decrypted.sub || decrypted.id || null;
+  } catch (_) {
+    const { rows: dc } = await pool.query(
+      `SELECT user_id FROM user_qr_display_codes
+       WHERE UPPER(code) = UPPER($1) AND expires_at > NOW()`,
+      [String(customerQrToken).trim()],
+    );
+    scannedUserId = dc[0] ? dc[0].user_id : null;
+  }
   if (!scannedUserId) {
     throw new AppError('Could not identify customer from QR token.', 400, 'INVALID_CUSTOMER_QR');
   }
