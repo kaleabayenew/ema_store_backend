@@ -323,6 +323,7 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
       o.delivery_requested_at,
       o.delivered_at,
       o.customer_accepted_at,
+      o.customer_rejected_at,
       o.payment_status,
       o.rider_arrived_at,
       da.full_name AS delivery_agent_name,
@@ -404,6 +405,7 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
     delivery_requested_at: r.delivery_requested_at || null,
     delivered_at: r.delivered_at || null,
     customer_accepted_at: r.customer_accepted_at || null,
+    customer_rejected_at: r.customer_rejected_at || null,
     payment_status: r.payment_status || 'PENDING',
     handed_over_at: r.handed_over_at || null,
     delivery_accepted_at: r.delivery_accepted_at || null,
@@ -604,6 +606,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       o.delivery_requested_at,
       o.delivered_at,
       o.customer_accepted_at,
+      o.customer_rejected_at,
       o.payment_status,
       o.rider_arrived_at,
       da.full_name AS delivery_agent_name,
@@ -673,6 +676,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       deliveryRequestedAt: row.delivery_requested_at || null,
       deliveredAt: row.delivered_at || null,
       customerAcceptedAt: row.customer_accepted_at || null,
+      customerRejectedAt: row.customer_rejected_at || null,
       paymentStatus: row.payment_status || 'PENDING',
       items: itemRows.map((i) => ({
         id: i.id,
@@ -707,6 +711,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
     delivery_requested_at: row.delivery_requested_at || null,
     delivered_at: row.delivered_at || null,
     customer_accepted_at: row.customer_accepted_at || null,
+    customer_rejected_at: row.customer_rejected_at || null,
     payment_status: row.payment_status || 'PENDING',
     handed_over_at: row.handed_over_at || null,
     delivery_accepted_at: row.delivery_accepted_at || null,
@@ -843,6 +848,71 @@ async function receiveOrder(userId, orderId) {
   return updatedOrder;
 }
 
+
+// Customer rejects the delivered package — rider must retry the handover.
+async function rejectDelivery(userId, orderId) {
+  await ensureOrderFlowSchema();
+  const client = await pool.connect();
+  let updatedOrder;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT o.id, o.status, o.user_id, o.delivery_agent_id, o.delivery_requested_at,
+              o.customer_accepted_at, o.delivery_code
+       FROM orders o
+       WHERE o.id = $1 AND o.user_id = $2
+       FOR UPDATE`,
+      [orderId, userId],
+    );
+    const order = rows[0];
+    if (!order) {
+      throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    }
+    if (!order.delivery_requested_at) {
+      throw new AppError('Delivery has not been requested for this order yet.', 400, 'DELIVERY_NOT_REQUESTED');
+    }
+    if (order.customer_accepted_at) {
+      throw new AppError('This delivery was already accepted.', 400, 'ALREADY_ACCEPTED');
+    }
+
+    const { rows: updateRows } = await client.query(
+      `UPDATE orders
+       SET customer_rejected_at = NOW(),
+           delivery_requested_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [orderId],
+    );
+    updatedOrder = updateRows[0];
+    await client.query('COMMIT');
+
+    // Notify the assigned rider (via linked user account) to retry.
+    if (order.delivery_agent_id) {
+      const { rows: agentRows } = await pool.query(
+        `SELECT u.id AS user_id FROM delivery_agents da
+         JOIN users u ON u.phone = da.phone
+         WHERE da.id = $1`,
+        [order.delivery_agent_id],
+      );
+      if (agentRows[0]) {
+        safeSendNotification(
+          agentRows[0].user_id,
+          'Customer declined the delivery',
+          `Order #${order.delivery_code || orderId.slice(0, 8)} was not accepted. Please contact the customer and retry.`,
+          { orderId, type: 'DELIVERY_REJECTED' },
+        );
+      }
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return updatedOrder;
+}
+
 module.exports = {
   createOrder,
   getUserOrders,
@@ -851,4 +921,5 @@ module.exports = {
   getOrderById,
   getPendingReceipt,
   receiveOrder,
+  rejectDelivery,
 };

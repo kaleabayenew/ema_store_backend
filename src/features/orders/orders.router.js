@@ -24,6 +24,7 @@ router.patch('/:id/status', adminOnly, ctrl.updateStatus);
 router.post('/', ctrl.createOrder);
 router.get('/pending-receipt', ctrl.getPendingReceipt);
 router.post('/:id/receive', ctrl.receiveOrder);
+router.post('/:id/reject-delivery', ctrl.rejectDelivery);
 router.get('/', ctrl.getUserOrders);
 router.get('/:id', ctrl.getOrderById);
 

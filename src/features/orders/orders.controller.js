@@ -117,6 +117,16 @@ const receiveOrder = async (req, res, next) => {
   }
 };
 
+// ── POST /api/v1/orders/:id/reject-delivery
+const rejectDelivery = async (req, res, next) => {
+  try {
+    const order = await service.rejectDelivery(req.user.id, req.params.id);
+    ok(res, { order, rejected: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createOrder,
   getUserOrders,
@@ -126,4 +136,5 @@ module.exports = {
   getOrderById,
   getPendingReceipt,
   receiveOrder,
+  rejectDelivery,
 };

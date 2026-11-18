@@ -43,6 +43,7 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handed_over_at TIMESTAMP`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_code VARCHAR(20)`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted_at TIMESTAMP`);
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_rejected_at TIMESTAMPTZ`);
       await db.query(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_delivery_code
          ON orders(delivery_code) WHERE delivery_code IS NOT NULL`,

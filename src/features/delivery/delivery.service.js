@@ -262,7 +262,7 @@ async function getActiveDelivery(rawCode) {
             o.delivery_code, o.status, o.created_at, o.delivery_accepted_at,
             o.handover_requested_at, o.handover_proof, o.handed_over_at,
             o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
-            o.customer_accepted_at, o.payment_status,
+            o.customer_accepted_at, o.customer_rejected_at, o.payment_status,
             u.full_name AS customer_name, u.phone AS customer_phone,
             shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
      FROM orders o
@@ -557,6 +557,7 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
       deliveredAt: r.delivered_at,
       deliveryRequestedAt: r.delivery_requested_at,
       customerAcceptedAt: r.customer_accepted_at,
+      customerRejectedAt: r.customer_rejected_at,
       customerName: r.customer_name || 'Customer',
       customerPhone: r.customer_phone || null,
       shopName: r.shop_name || 'Ema Store Partner',
