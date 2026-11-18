@@ -6,7 +6,7 @@ const {
   maskPhone,
   safeSendNotification,
 } = require('../../orders/order_flow');
-const { resolveAgentDisplayCode } = require('../../../delivery/agent_qr');
+const { resolveAgentDisplayCode } = require('../../delivery/agent_qr');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
