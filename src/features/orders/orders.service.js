@@ -324,6 +324,7 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
       o.delivered_at,
       o.customer_accepted_at,
       o.payment_status,
+      o.rider_arrived_at,
       da.full_name AS delivery_agent_name,
       da.phone AS delivery_agent_phone,
       da.agent_code AS delivery_agent_code
@@ -406,6 +407,7 @@ async function getUserOrders(userId, limit = 20, offset = 0) {
     payment_status: r.payment_status || 'PENDING',
     handed_over_at: r.handed_over_at || null,
     delivery_accepted_at: r.delivery_accepted_at || null,
+    rider_arrived_at: r.rider_arrived_at || null,
     items: itemsByOrder[r.id] || [],
   }));
 }
@@ -465,13 +467,17 @@ async function getAllOrders({ page = 1, limit = 20, status, search } = {}) {
       COALESCE(cu.full_name, u.phone, 'Customer')                            AS customer_name,
       u.phone                                                                AS customer_phone,
       u.email                                                                AS customer_email,
+      o.delivery_code,
+      da.full_name                                                           AS delivery_agent_name,
+      da.agent_code                                                          AS delivery_agent_code,
       COUNT(oi.id)::int                                                      AS item_count
     FROM orders o
     LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN customer_user cu ON cu.user_id = o.user_id
     LEFT JOIN order_items oi ON o.id = oi.order_id
+    LEFT JOIN delivery_agents da ON da.id = o.delivery_agent_id
     ${where}
-    GROUP BY o.id, cu.full_name, u.phone, u.email
+    GROUP BY o.id, cu.full_name, u.phone, u.email, da.id
     ORDER BY o.created_at DESC
     LIMIT $${idx} OFFSET $${idx + 1}
   `, [...params, limit, offset]);
@@ -487,6 +493,9 @@ async function getAllOrders({ page = 1, limit = 20, status, search } = {}) {
       customerPhone: r.customer_phone ?? '',
       customerEmail: r.customer_email ?? '',
       itemCount: r.item_count,
+      deliveryCode: r.delivery_code || null,
+      deliveryAgentName: r.delivery_agent_name || null,
+      deliveryAgentCode: r.delivery_agent_code || null,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     })),
@@ -555,7 +564,9 @@ async function updateOrderStatus(orderId, status) {
 
     const { rows } = await client.query(`
       UPDATE orders
-      SET status = $1, updated_at = NOW()
+      SET status = $1,
+          delivered_at = CASE WHEN $1 = 'DELIVERED' AND status <> 'DELIVERED' THEN NOW() ELSE delivered_at END,
+          updated_at = NOW()
       WHERE id = $2
       RETURNING *
     `, [next, orderId]);
@@ -594,6 +605,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       o.delivered_at,
       o.customer_accepted_at,
       o.payment_status,
+      o.rider_arrived_at,
       da.full_name AS delivery_agent_name,
       da.phone AS delivery_agent_phone,
       da.agent_code AS delivery_agent_code
@@ -649,6 +661,19 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
       customerEmail: row.customer_email ?? '',
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      deliveryCode: row.delivery_code || null,
+      deliveryAgentId: row.delivery_agent_id || null,
+      deliveryAgentName: row.delivery_agent_name || null,
+      deliveryAgentPhone: row.delivery_agent_phone || null,
+      deliveryAgentCode: row.delivery_agent_code || null,
+      handoverRequestedAt: row.handover_requested_at || null,
+      handedOverAt: row.handed_over_at || null,
+      deliveryAcceptedAt: row.delivery_accepted_at || null,
+      riderArrivedAt: row.rider_arrived_at || null,
+      deliveryRequestedAt: row.delivery_requested_at || null,
+      deliveredAt: row.delivered_at || null,
+      customerAcceptedAt: row.customer_accepted_at || null,
+      paymentStatus: row.payment_status || 'PENDING',
       items: itemRows.map((i) => ({
         id: i.id,
         productName: i.product_name,
@@ -685,6 +710,7 @@ async function getOrderById(orderId, userId = null, forAdmin = false) {
     payment_status: row.payment_status || 'PENDING',
     handed_over_at: row.handed_over_at || null,
     delivery_accepted_at: row.delivery_accepted_at || null,
+    rider_arrived_at: row.rider_arrived_at || null,
     items: itemRows.map((i) => ({
       id: i.id,
       order_id: i.order_id,
