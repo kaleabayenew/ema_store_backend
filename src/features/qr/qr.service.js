@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../../core/config');
 const { pool } = require('../../core/config/database');
@@ -6,6 +7,34 @@ const { encryptDynamicToken, decryptDynamicToken } = require('../orders/order_fl
 
 // 5 minutes in seconds
 const QR_TTL_SECONDS = 300;
+
+// ── Short display ID (8 chars, mixed case + digits, 5-minute validity) ──
+const DISPLAY_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+
+function randomUserDisplayCode() {
+  const bytes = crypto.randomBytes(8);
+  let out = '';
+  for (let i = 0; i < 8; i++) out += DISPLAY_CHARS[bytes[i] % DISPLAY_CHARS.length];
+  return out;
+}
+
+async function createUserDisplayCode(userId) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = randomUserDisplayCode();
+    try {
+      await pool.query(
+        `INSERT INTO user_qr_display_codes (code, user_id, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '5 minutes')`,
+        [code, userId],
+      );
+      return code;
+    } catch (err) {
+      if (err && err.code === '23505') continue;
+      throw err;
+    }
+  }
+  throw new AppError('Could not generate a display code. Try again.', 500, 'CODE_GENERATION_FAILED');
+}
 
 /**
  * Generate a dynamic 5-minute encrypted AES-256-GCM QR token for the authenticated user.
@@ -52,8 +81,16 @@ async function generateUserQrToken(userId) {
     QR_TTL_SECONDS,
   );
 
+  let displayCode = null;
+  try {
+    displayCode = await createUserDisplayCode(user.id);
+  } catch (_) {
+    // Display ID is cosmetic — never block QR generation because of it.
+  }
+
   return {
     qrToken: token,
+    displayCode,
     expiresInSeconds,
     expiresAt,
     user: {

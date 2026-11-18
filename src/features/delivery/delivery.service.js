@@ -602,7 +602,12 @@ async function markArrived(rawCode, orderId) {
 async function getAgentQr(rawCode) {
   const agent = await findAgent(rawCode);
   const { token, expiresInSeconds, expiresAt } = encryptAgentCode(agent.agent_code);
-  const displayCode = await createAgentDisplayCode(agent.id);
+  let displayCode = null;
+  try {
+    displayCode = await createAgentDisplayCode(agent.id);
+  } catch (_) {
+    // Display ID is cosmetic — never block QR generation because of it.
+  }
   return {
     agentCode: agent.agent_code,
     displayCode,
