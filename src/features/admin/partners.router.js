@@ -5,6 +5,7 @@ const orderCtrl = require('./orders.controller');
 const dashboardCtrl = require('./dashboard.controller');
 const approvalsCtrl = require('./approvals.controller');
 const communityCtrl = require('./community.controller');
+const agentsCtrl = require('./agents.controller');
 
 const router = Router();
 
@@ -25,6 +26,11 @@ router.delete('/reviews/:id', adminOnly, communityCtrl.deleteReview);
 router.get('/feedback', communityCtrl.getAllFeedback);
 router.patch('/feedback/:id/status', adminOnly, communityCtrl.updateFeedbackStatus);
 router.delete('/feedback/:id', adminOnly, communityCtrl.deleteFeedback);
+
+// Delivery agents (ride riders)
+router.get('/agents', agentsCtrl.listAgents);
+router.post('/agents', adminOnly, agentsCtrl.createAgent);
+router.patch('/agents/:id/status', adminOnly, agentsCtrl.setAgentStatus);
 
 // Partners
 router.get('/partners', partnerCtrl.getAllPartners);
