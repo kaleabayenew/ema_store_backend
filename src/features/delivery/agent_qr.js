@@ -88,4 +88,58 @@ function decryptAgentQr(raw) {
   }
 }
 
-module.exports = { encryptAgentCode, isEncryptedAgentQr, decryptAgentQr };
+
+// ── Short display ID (6 chars, mixed case + digits, 5-minute validity) ──
+const { pool } = require('../../core/config/database');
+const DISPLAY_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+const DISPLAY_TTL_SECONDS = 300;
+
+function randomDisplayCode() {
+  const bytes = crypto.randomBytes(6);
+  let out = '';
+  for (let i = 0; i < 6; i++) out += DISPLAY_CHARS[bytes[i] % DISPLAY_CHARS.length];
+  return out;
+}
+
+// Creates a fresh 5-minute display code for the agent, replacing any
+// previous unexpired one. Returns the code string.
+async function createAgentDisplayCode(agentId) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = randomDisplayCode();
+    try {
+      await pool.query(
+        `INSERT INTO qr_display_codes (code, agent_id, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '5 minutes')`,
+        [code, agentId],
+      );
+      return code;
+    } catch (err) {
+      if (err && err.code === '23505') continue; // code collision — retry
+      throw err;
+    }
+  }
+  throw new AppError('Could not generate a display code. Try again.', 500, 'CODE_GENERATION_FAILED');
+}
+
+// Resolves a typed/scanned display code to an agent_id, or null.
+async function resolveAgentDisplayCode(rawCode) {
+  const code = String(rawCode || '').trim();
+  if (!code) return null;
+  const { rows } = await pool.query(
+    `SELECT agent_id FROM qr_display_codes
+     WHERE code = $1 AND expires_at > NOW() AND agent_id IS NOT NULL`,
+    [code.toUpperCase()] ,
+  );
+  // codes are mixed-case; try exact then upper
+  if (!rows[0]) {
+    const r2 = await pool.query(
+      `SELECT agent_id FROM qr_display_codes
+       WHERE UPPER(code) = UPPER($1) AND expires_at > NOW() AND agent_id IS NOT NULL`,
+      [code],
+    );
+    return r2.rows[0]?.agent_id || null;
+  }
+  return rows[0].agent_id;
+}
+
+module.exports = { encryptAgentCode, isEncryptedAgentQr, decryptAgentQr, createAgentDisplayCode, resolveAgentDisplayCode };

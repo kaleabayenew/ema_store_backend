@@ -54,6 +54,17 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(
         `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)`,
       );
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS qr_display_codes (
+           code VARCHAR(12) PRIMARY KEY,
+           agent_id UUID,
+           expires_at TIMESTAMPTZ NOT NULL
+         )`,
+      );
+      await db.query(
+        `CREATE INDEX IF NOT EXISTS idx_qr_display_codes_agent
+         ON qr_display_codes(agent_id)`,
+      );
     })().catch((err) => {
       schemaPromise = null; // retry on next call
       throw err;

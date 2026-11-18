@@ -6,6 +6,7 @@ const {
   maskPhone,
   safeSendNotification,
 } = require('../../orders/order_flow');
+const { resolveAgentDisplayCode } = require('../../../delivery/agent_qr');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -299,13 +300,57 @@ async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
 async function findAgent(client, rawCode) {
   const code = normalizeAgentCode(rawCode);
   if (!code) throw new AppError('Delivery ID is required.', 400, 'MISSING_FIELDS');
-  const { rows } = await client.query(
-    `SELECT id, agent_code, full_name, phone, is_active
-     FROM delivery_agents WHERE agent_code = $1`,
+  const selectAgent = `SELECT id, agent_code, full_name, phone, is_active
+     FROM delivery_agents`;
+  let { rows } = await client.query(
+    `${selectAgent} WHERE agent_code = $1`,
     [code],
   );
-  const agent = rows[0];
-  if (!agent) throw new AppError('Delivery person ID not recognised.', 404, 'AGENT_NOT_FOUND');
+  // Fallback: the partner may type the rider's phone number instead of the
+  // agent code — match on the last 9 digits of the stored phone.
+  if (!rows[0]) {
+    const digits = code.replace(/\D/g, '');
+    if (digits.length >= 9) {
+      const last9 = digits.slice(-9);
+      ({ rows } = await client.query(
+        `${selectAgent} WHERE regexp_replace(COALESCE(phone,''), '\\D', '', 'g') LIKE '%' || $1`,
+        [last9],
+      ));
+    }
+  }
+  let agent = rows[0];
+  // Fallback: short 5-minute display ID shown on the rider QR screen.
+  if (!agent) {
+    const displayAgentId = await resolveAgentDisplayCode(code);
+    if (displayAgentId) {
+      const r = await client.query(
+        `SELECT id, agent_code, full_name, phone, is_active
+         FROM delivery_agents WHERE id = $1`,
+        [displayAgentId],
+      );
+      agent = r.rows[0];
+    }
+  }
+  if (!agent) {
+    // A common mistake is scanning the order's delivery_code instead of the
+    // rider's ID — detect it and explain.
+    const { rows: orderHit } = await client.query(
+      `SELECT 1 FROM orders WHERE delivery_code = $1 LIMIT 1`,
+      [code],
+    );
+    if (orderHit.length > 0) {
+      throw new AppError(
+        'That is the order delivery code, not a rider ID. Ask the rider to show their QR code.',
+        404,
+        'ORDER_CODE_NOT_RIDER',
+      );
+    }
+    throw new AppError(
+      `Delivery person ID "${code}" not recognised. Scan the QR on the rider's ID card or type their agent code.`,
+      404,
+      'AGENT_NOT_FOUND',
+    );
+  }
   if (agent.is_active === false) {
     throw new AppError('This delivery person is not active.', 403, 'AGENT_INACTIVE');
   }

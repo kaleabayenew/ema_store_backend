@@ -1,6 +1,6 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
-const { encryptAgentCode } = require('./agent_qr');
+const { encryptAgentCode, createAgentDisplayCode } = require('./agent_qr');
 const {
   ensureOrderFlowSchema,
   decryptDynamicToken,
@@ -602,8 +602,10 @@ async function markArrived(rawCode, orderId) {
 async function getAgentQr(rawCode) {
   const agent = await findAgent(rawCode);
   const { token, expiresInSeconds, expiresAt } = encryptAgentCode(agent.agent_code);
+  const displayCode = await createAgentDisplayCode(agent.id);
   return {
     agentCode: agent.agent_code,
+    displayCode,
     token,
     expiresInSeconds,
     expiresAt,
