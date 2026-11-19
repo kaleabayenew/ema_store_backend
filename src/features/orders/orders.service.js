@@ -284,6 +284,36 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
 
     await client.query('COMMIT');
 
+    // Notify partner(s) and customer of the new order
+    try {
+      const { rows: partnerRows } = await pool.query(
+        `SELECT DISTINCT p.partner_id FROM order_items oi
+         JOIN products p ON p.id = oi.product_id
+         WHERE oi.order_id = $1`,
+        [order.id],
+      );
+      for (const pr of partnerRows) {
+        if (pr.partner_id) {
+          safeSendNotification(
+            pr.partner_id,
+            'New Order Received',
+            `You have received a new order #${order.delivery_code || order.id.slice(0, 8)}.`,
+            { orderId: order.id, type: 'NEW_ORDER', deliveryCode: order.delivery_code },
+          );
+        }
+      }
+
+      // Notify customer
+      safeSendNotification(
+        userId,
+        'Order Confirmed',
+        `Your order #${order.delivery_code || order.id.slice(0, 8)} has been confirmed!`,
+        { orderId: order.id, type: 'ORDER_PLACED', deliveryCode: order.delivery_code },
+      );
+    } catch (notifErr) {
+      console.error('[notify] Order creation notification failed:', notifErr.message);
+    }
+
     return order;
   } catch (err) {
     await client.query('ROLLBACK');

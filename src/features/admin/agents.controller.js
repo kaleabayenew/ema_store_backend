@@ -27,6 +27,7 @@ const listAgents = async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT a.id, a.agent_code, a.full_name, a.phone, a.is_active, a.created_at,
+              a.last_lat, a.last_lng, a.last_location_at,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL)::int AS completed_deliveries,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NULL
                                    AND o.status IN ('CONFIRMED','PACKED','SHIPPED'))::int AS active_deliveries,
@@ -41,24 +42,38 @@ const listAgents = async (req, res, next) => {
       params,
     );
 
-    const agents = rows.map((r) => ({
-      id: r.id,
-      agentCode: r.agent_code,
-      fullName: r.full_name,
-      phone: r.phone || null,
-      isActive: r.is_active !== false,
-      createdAt: r.created_at,
-      completedDeliveries: r.completed_deliveries || 0,
-      activeDeliveries: r.active_deliveries || 0,
-      deliveriesToday: r.deliveries_today || 0,
-      lastDeliveryAt: r.last_delivery_at,
-    }));
+    const ONLINE_WINDOW_MS = 3 * 60 * 1000; // riders report GPS ~every 10 s
+    const agents = rows.map((r) => {
+      const lastLocationAt = r.last_location_at
+        ? new Date(r.last_location_at)
+        : null;
+      const isOnline =
+        lastLocationAt !== null &&
+        Date.now() - lastLocationAt.getTime() < ONLINE_WINDOW_MS;
+      return {
+        id: r.id,
+        agentCode: r.agent_code,
+        fullName: r.full_name,
+        phone: r.phone || null,
+        isActive: r.is_active !== false,
+        createdAt: r.created_at,
+        completedDeliveries: r.completed_deliveries || 0,
+        activeDeliveries: r.active_deliveries || 0,
+        deliveriesToday: r.deliveries_today || 0,
+        lastDeliveryAt: r.last_delivery_at,
+        isOnline,
+        lastLocationAt: r.last_location_at,
+        lastLat: r.last_lat,
+        lastLng: r.last_lng,
+      };
+    });
 
     ok(res, {
       agents,
       stats: {
         totalRiders: agents.filter((a) => a.isActive).length,
         activeRiders: agents.filter((a) => a.isActive && a.activeDeliveries > 0).length,
+        onlineRiders: agents.filter((a) => a.isOnline).length,
         deliveriesToday: agents.reduce((sum, a) => sum + a.deliveriesToday, 0),
         completedDeliveries: agents.reduce((sum, a) => sum + a.completedDeliveries, 0),
       },

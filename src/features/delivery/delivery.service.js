@@ -70,7 +70,8 @@ async function listOffers(rawCode) {
   const { rows } = await pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at,
-            shop.shop_name, shop.address AS shop_address
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
+            COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address
      FROM orders o
      LEFT JOIN LATERAL (
        SELECT p.partner_id FROM order_items oi
@@ -289,7 +290,8 @@ async function getActiveDelivery(rawCode) {
             o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
             o.customer_accepted_at, o.customer_rejected_at, o.payment_status,
             u.full_name AS customer_name, u.phone AS customer_phone,
-            shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
+            COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address, shop.phone AS shop_phone
      FROM orders o
      JOIN users u ON u.id = o.user_id
      LEFT JOIN LATERAL (
@@ -532,7 +534,8 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
             o.delivery_accepted_at, o.handed_over_at, o.delivered_at,
             o.delivery_requested_at, o.customer_accepted_at,
             u.full_name AS customer_name, u.phone AS customer_phone,
-            shop.shop_name, shop.address AS shop_address, shop.phone AS shop_phone
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
+            COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address, shop.phone AS shop_phone
      FROM orders o
      JOIN users u ON u.id = o.user_id
      LEFT JOIN LATERAL (
@@ -660,6 +663,103 @@ async function getAgentQr(rawCode) {
   };
 }
 
+/**
+ * Rider earnings summary: totals for today / last 7 days / all time plus a
+ * short list of recent completed deliveries. The per-delivery earning uses
+ * the same 10% rule the ride app applies to the order total.
+ */
+async function getEarnings(rawCode) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+
+  const { rows } = await pool.query(
+    `SELECT o.id, o.delivery_code, o.status, o.created_at, o.delivered_at,
+            COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) AS total_cents,
+            u.full_name AS customer_name,
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name
+     FROM orders o
+     JOIN users u ON u.id = o.user_id
+     LEFT JOIN LATERAL (
+       SELECT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = o.id
+       LIMIT 1
+     ) sp ON true
+     LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+     WHERE o.delivery_agent_id = $1
+       AND o.delivered_at IS NOT NULL
+     ORDER BY o.delivered_at DESC
+     LIMIT 200`,
+    [agent.id],
+  );
+
+  const earningOf = (r) => Math.round(((Number(r.total_cents) || 0) * 0.10));
+
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  let todayCents = 0;
+  let weekCents = 0;
+  let totalCents = 0;
+  let deliveriesToday = 0;
+  let deliveriesWeek = 0;
+
+  const recent = rows.slice(0, 15).map((r) => {
+    const earning = earningOf(r);
+    totalCents += earning;
+    const deliveredAt = r.delivered_at ? new Date(r.delivered_at) : null;
+    if (deliveredAt && deliveredAt >= startOfToday) {
+      todayCents += earning;
+      deliveriesToday += 1;
+    }
+    if (deliveredAt && deliveredAt >= weekAgo) {
+      weekCents += earning;
+      deliveriesWeek += 1;
+    }
+    return {
+      id: r.id,
+      orderNumber: r.delivery_code || String(r.id).slice(0, 8).toUpperCase(),
+      earningCents: earning,
+      totalCents: Number(r.total_cents) || 0,
+      shopName: r.shop_name || 'Ema Store Partner',
+      customerName: r.customer_name || 'Customer',
+      status: r.status,
+      deliveredAt: r.delivered_at,
+      createdAt: r.created_at,
+    };
+  });
+
+  // Totals must cover ALL delivered orders, not just the recent 15.
+  const { rows: totals } = await pool.query(
+    `SELECT
+       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)) FILTER (
+         WHERE o.delivered_at >= date_trunc('day', NOW())), 0)::bigint AS today_cents,
+       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)) FILTER (
+         WHERE o.delivered_at >= NOW() - INTERVAL '7 days'), 0)::bigint AS week_cents,
+       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)), 0)::bigint AS total_cents,
+       COUNT(*) FILTER (WHERE o.delivered_at >= date_trunc('day', NOW()))::int AS deliveries_today,
+       COUNT(*) FILTER (WHERE o.delivered_at >= NOW() - INTERVAL '7 days')::int AS deliveries_week,
+       COUNT(*)::int AS total_deliveries
+     FROM orders o
+     WHERE o.delivery_agent_id = $1 AND o.delivered_at IS NOT NULL`,
+    [agent.id],
+  );
+  const t = totals[0] || {};
+
+  return {
+    agent: { code: agent.agent_code, name: agent.full_name },
+    todayCents: Math.round(Number(t.today_cents || 0) * 0.10),
+    weekCents: Math.round(Number(t.week_cents || 0) * 0.10),
+    totalCents: Math.round(Number(t.total_cents || 0) * 0.10),
+    deliveriesToday: t.deliveries_today || 0,
+    deliveriesWeek: t.deliveries_week || 0,
+    totalDeliveries: t.total_deliveries || 0,
+    recent,
+  };
+}
+
 module.exports = {
   getAgentQr,
   listOffers,
@@ -670,5 +770,6 @@ module.exports = {
   scanDelivery,
   markArrived,
   getDeliveryHistory,
+  getEarnings,
   updateAgentLocation,
 };

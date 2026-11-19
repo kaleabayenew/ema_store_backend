@@ -64,6 +64,15 @@ const getHistory = async (req, res, next) => {
   }
 };
 
+const getEarnings = async (req, res, next) => {
+  try {
+    const result = await service.getEarnings(agentCode(req));
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getActiveDelivery = async (req, res, next) => {
   try {
     const result = await service.getActiveDelivery(agentCode(req));
@@ -112,6 +121,7 @@ module.exports = {
   declineOffer,
   getActiveDelivery,
   getHistory,
+  getEarnings,
   confirmPickup,
   scanDelivery,
   markArrived,
