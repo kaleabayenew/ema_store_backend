@@ -7,14 +7,19 @@ const {
   verifyOtp,
   normalizePhone,
 } = require('../../auth/auth.service');
+const { ensureOrderFlowSchema, cleanCoord } = require('../../orders/order_flow');
 
 const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', 10);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Register — Step 1
 // ─────────────────────────────────────────────────────────────────────────────
-async function register(phone, ownerName, shopName, address, city) {
+async function register(phone, ownerName, shopName, address, city, shopLat = null, shopLng = null) {
   const normalizedPhone = normalizePhone(phone);
+  await ensureOrderFlowSchema();
+  let lat = cleanCoord(shopLat, 90);
+  let lng = cleanCoord(shopLng, 180);
+  if (lat === null || lng === null) { lat = null; lng = null; }
 
   const { rows } = await pool.query(
     `SELECT id FROM users WHERE phone = $1 AND role = 'PARTNER'`,
@@ -37,9 +42,9 @@ async function register(phone, ownerName, shopName, address, city) {
     const userId = userRows[0].id;
 
     await client.query(
-      `INSERT INTO partner_profile (user_id, owner_name, shop_name, business_name, address, city)
-       VALUES ($1, $2, $3, $3, $4, $5)`,
-      [userId, ownerName, shopName, address, city],
+      `INSERT INTO partner_profile (user_id, owner_name, shop_name, business_name, address, city, shop_lat, shop_lng)
+       VALUES ($1, $2, $3, $3, $4, $5, $6, $7)`,
+      [userId, ownerName, shopName, address, city, lat, lng],
     );
 
     await client.query('COMMIT');

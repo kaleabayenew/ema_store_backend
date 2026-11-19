@@ -63,9 +63,9 @@ async function loadItems(orderIds, partnerId) {
        ORDER BY pi.is_primary DESC, pi.sort_order, pi.created_at
        LIMIT 1
      ) img ON true
-     WHERE oi.order_id = ANY($1::uuid[]) AND p.partner_id = $2
+     WHERE oi.order_id = ANY($1::uuid[])
      ORDER BY oi.created_at`,
-    [orderIds, partnerId],
+    [orderIds],
   );
   const byOrder = {};
   for (const r of rows) {

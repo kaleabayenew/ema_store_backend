@@ -39,6 +39,20 @@ const declineOffer = async (req, res, next) => {
   }
 };
 
+const updateLocation = async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const result = await service.updateAgentLocation(
+      agentCode(req),
+      body.lat ?? body.latitude,
+      body.lng ?? body.longitude,
+    );
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getHistory = async (req, res, next) => {
   try {
     const result = await service.getDeliveryHistory(agentCode(req), {
@@ -91,6 +105,7 @@ const scanDelivery = async (req, res, next) => {
 };
 
 module.exports = {
+  updateLocation,
   getQr,
   listOffers,
   acceptOffer,

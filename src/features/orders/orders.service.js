@@ -4,6 +4,7 @@ const {
   ensureOrderFlowSchema,
   generateDeliveryCode,
   safeSendNotification,
+  parseAddressPin,
 } = require('./order_flow');
 
 // ============================================================================
@@ -913,6 +914,134 @@ async function rejectDelivery(userId, orderId) {
   return updatedOrder;
 }
 
+// ── Live tracking ───────────────────────────────────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RIDER_LIVE_WINDOW_MS = 2 * 60 * 1000; // a fix older than this is "stale"
+
+/** Maps the raw order row to a customer-friendly stage. */
+function computeTrackingStage(row) {
+  const status = String(row.status || '').toUpperCase();
+  const hasRider = !!row.delivery_agent_id;
+
+  if (status === 'CANCELLED') {
+    return { stage: 'CANCELLED', label: 'Order cancelled', holder: 'PARTNER', stepIndex: 0 };
+  }
+  if (status === 'DELIVERED' || row.delivered_at) {
+    return { stage: 'DELIVERED', label: 'Delivered', holder: 'CUSTOMER', stepIndex: 4 };
+  }
+  if (status === 'SHIPPED') {
+    if (row.rider_arrived_at) {
+      return { stage: 'ARRIVED', label: 'Rider has arrived', holder: 'RIDER', stepIndex: 3 };
+    }
+    return { stage: 'ON_THE_WAY', label: 'On the way to you', holder: 'RIDER', stepIndex: 3 };
+  }
+  if (status === 'PACKED') {
+    return hasRider
+      ? { stage: 'RIDER_TO_SHOP', label: 'Packed - rider is collecting it', holder: 'PARTNER', stepIndex: 2 }
+      : { stage: 'READY_FOR_PICKUP', label: 'Packed - waiting for a rider', holder: 'PARTNER', stepIndex: 2 };
+  }
+  if (status === 'CONFIRMED' || status === 'PROCESSING') {
+    return hasRider
+      ? { stage: 'RIDER_TO_SHOP', label: 'Rider is heading to the shop', holder: 'PARTNER', stepIndex: 1 }
+      : { stage: 'PREPARING', label: 'Shop is preparing your order', holder: 'PARTNER', stepIndex: 1 };
+  }
+  return { stage: 'PLACED', label: 'Order placed', holder: 'PARTNER', stepIndex: 0 };
+}
+
+/**
+ * GET /orders/:id/tracking — where the package is right now.
+ * Returns the customer's drop-off pin, the shop pin, and the rider's last GPS
+ * fix (only while a rider is assigned and the order is still in progress).
+ */
+async function getOrderTracking(orderId, userId) {
+  await ensureOrderFlowSchema();
+  if (!UUID_RE.test(String(orderId || ''))) {
+    throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  }
+
+  const { rows } = await pool.query(
+    `SELECT o.id, o.status, o.shipping_address, o.delivery_agent_id,
+            o.handover_requested_at, o.handed_over_at, o.rider_arrived_at,
+            o.delivered_at, o.updated_at,
+            da.full_name AS rider_name, da.phone AS rider_phone,
+            da.last_lat, da.last_lng, da.last_location_at,
+            shop.shop_name, shop.address AS shop_address,
+            shop.shop_lat, shop.shop_lng
+       FROM orders o
+       LEFT JOIN delivery_agents da ON da.id = o.delivery_agent_id
+       LEFT JOIN LATERAL (
+         SELECT p.partner_id
+           FROM order_items oi
+           JOIN products p ON p.id = oi.product_id
+          WHERE oi.order_id = o.id
+          LIMIT 1
+       ) sp ON true
+       LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+      WHERE o.id = $1 AND o.user_id = $2`,
+    [orderId, userId],
+  );
+  if (rows.length === 0) {
+    throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  }
+  const r = rows[0];
+  const info = computeTrackingStage(r);
+  const finished = info.stage === 'DELIVERED' || info.stage === 'CANCELLED';
+
+  // Customer drop-off pin (saved by the app inside the shipping address).
+  const dropoff = parseAddressPin(r.shipping_address);
+
+  // Shop pin: saved coordinates first, then any "Pin:" inside the address.
+  let shopLat = r.shop_lat !== null && r.shop_lat !== undefined ? Number(r.shop_lat) : null;
+  let shopLng = r.shop_lng !== null && r.shop_lng !== undefined ? Number(r.shop_lng) : null;
+  if (shopLat === null || shopLng === null || !Number.isFinite(shopLat) || !Number.isFinite(shopLng)) {
+    const fromAddr = parseAddressPin(r.shop_address);
+    shopLat = fromAddr.lat;
+    shopLng = fromAddr.lng;
+  }
+
+  // Rider (only while the job is in progress).
+  let rider = null;
+  if (r.delivery_agent_id && !finished) {
+    const fixAt = r.last_location_at ? new Date(r.last_location_at) : null;
+    const hasFix = r.last_lat !== null && r.last_lat !== undefined &&
+                   r.last_lng !== null && r.last_lng !== undefined;
+    rider = {
+      name: r.rider_name || 'Courier',
+      phone: r.rider_phone || null,
+      lat: hasFix ? Number(r.last_lat) : null,
+      lng: hasFix ? Number(r.last_lng) : null,
+      updatedAt: fixAt ? fixAt.toISOString() : null,
+      isLive: !!(hasFix && fixAt && Date.now() - fixAt.getTime() <= RIDER_LIVE_WINDOW_MS),
+      arrived: !!r.rider_arrived_at,
+    };
+  }
+
+  return {
+    orderId: r.id,
+    status: r.status,
+    stage: info.stage,
+    stageLabel: info.label,
+    stepIndex: info.stepIndex,
+    holder: info.holder, // PARTNER | RIDER | CUSTOMER
+    finished,
+    customer: {
+      address: r.shipping_address || null,
+      lat: dropoff.lat,
+      lng: dropoff.lng,
+    },
+    partner: {
+      name: r.shop_name || 'Shop',
+      address: r.shop_address || null,
+      lat: Number.isFinite(shopLat) ? shopLat : null,
+      lng: Number.isFinite(shopLng) ? shopLng : null,
+    },
+    rider,
+    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
+    serverTime: new Date().toISOString(),
+  };
+}
+
 module.exports = {
   createOrder,
   getUserOrders,
@@ -922,4 +1051,5 @@ module.exports = {
   getPendingReceipt,
   receiveOrder,
   rejectDelivery,
+  getOrderTracking,
 };

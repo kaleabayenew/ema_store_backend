@@ -97,6 +97,17 @@ const getOrderById = async (req, res, next) => {
   }
 };
 
+// ── GET /api/v1/orders/:id/tracking
+// Live location + stage of the customer's own order
+const getOrderTracking = async (req, res, next) => {
+  try {
+    const tracking = await service.getOrderTracking(req.params.id, req.user.id);
+    ok(res, { tracking });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ── GET /api/v1/orders/pending-receipt
 const getPendingReceipt = async (req, res, next) => {
   try {
@@ -137,4 +148,5 @@ module.exports = {
   getPendingReceipt,
   receiveOrder,
   rejectDelivery,
+  getOrderTracking,
 };

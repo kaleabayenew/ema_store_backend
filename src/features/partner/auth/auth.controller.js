@@ -3,11 +3,11 @@ const { ok, created, error } = require('../../../core/utils/response');
 
 const register = async (req, res, next) => {
   try {
-    const { phone, ownerName, shopName, address, city } = req.body;
+    const { phone, ownerName, shopName, address, city, shopLat, shopLng } = req.body;
     if (!phone || !ownerName || !shopName) {
       return error(res, 'phone, ownerName and shopName are required.', 400, 'MISSING_FIELDS');
     }
-    const result = await service.register(phone.trim(), ownerName, shopName, address, city);
+    const result = await service.register(phone.trim(), ownerName, shopName, address, city, shopLat, shopLng);
     ok(res, result);
   } catch (err) {
     next(err);

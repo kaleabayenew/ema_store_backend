@@ -6,6 +6,8 @@ const {
   decryptDynamicToken,
   safeSendNotification,
   maskPhone,
+  parseAddressPin,
+  cleanCoord,
 } = require('../orders/order_flow');
 
 /** Accepts raw QR content such as "ABC123" or "EMA-AGENT:ABC123". */
@@ -40,6 +42,27 @@ async function findAgent(code) {
  * pickup place (shop name + address), delivery place (customer address), items, total.
  * Customer name/phone and shop phone are HIDDEN until accept.
  */
+/**
+ * Rider app reports its GPS position (call every ~10 s while on shift).
+ * Customers see it on the live-tracking map of their order.
+ */
+async function updateAgentLocation(rawCode, lat, lng) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+  const la = cleanCoord(lat, 90);
+  const ln = cleanCoord(lng, 180);
+  if (la === null || ln === null) {
+    throw new AppError('Valid lat and lng are required.', 400, 'INVALID_LOCATION');
+  }
+  await pool.query(
+    `UPDATE delivery_agents
+        SET last_lat = $1, last_lng = $2, last_location_at = NOW()
+      WHERE id = $3`,
+    [la, ln, agent.id],
+  );
+  return { ok: true, updatedAt: new Date().toISOString() };
+}
+
 async function listOffers(rawCode) {
   await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
@@ -93,6 +116,8 @@ async function listOffers(rawCode) {
       totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
       paymentMethod: r.payment_method || '',
       shippingAddress: r.shipping_address || '',
+      dropoffLat: parseAddressPin(r.shipping_address).lat,
+      dropoffLng: parseAddressPin(r.shipping_address).lng,
       deliveryCode: r.delivery_code || null,
       status: r.status,
       // Step 3 Privacy: customer name/phone and shop phone hidden until accept
@@ -300,6 +325,8 @@ async function getActiveDelivery(rawCode) {
     totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
     paymentMethod: r.payment_method || '',
     shippingAddress: r.shipping_address || '',
+    dropoffLat: parseAddressPin(r.shipping_address).lat,
+    dropoffLng: parseAddressPin(r.shipping_address).lng,
     deliveryCode: r.delivery_code || null,
     status: r.status,
     createdAt: r.created_at,
@@ -549,6 +576,8 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
       totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
       paymentMethod: r.payment_method || '',
       shippingAddress: r.shipping_address || '',
+      dropoffLat: parseAddressPin(r.shipping_address).lat,
+      dropoffLng: parseAddressPin(r.shipping_address).lng,
       deliveryCode: r.delivery_code || null,
       status: r.status,
       createdAt: r.created_at,
@@ -641,4 +670,5 @@ module.exports = {
   scanDelivery,
   markArrived,
   getDeliveryHistory,
+  updateAgentLocation,
 };

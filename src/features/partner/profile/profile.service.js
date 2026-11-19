@@ -1,5 +1,6 @@
 const { pool } = require('../../../core/config/database');
 const { AppError } = require('../../../core/errors/app_error');
+const { ensureOrderFlowSchema, cleanCoord } = require('../../orders/order_flow');
 
 async function getProfile(userId) {
   const { rows } = await pool.query(
@@ -14,7 +15,12 @@ async function getProfile(userId) {
 
 async function updateProfile(userId, data) {
   const ALLOWED = ['shop_name', 'owner_name', 'description', 'address', 'delivery_areas', 'city', 'phone', 'email',
-                    'bank_name', 'account_number', 'telebirr_phone', 'is_open', 'opening_days'];
+                    'bank_name', 'account_number', 'telebirr_phone', 'is_open', 'opening_days',
+                    'shop_lat', 'shop_lng'];
+  if (data.shop_lat !== undefined || data.shop_lng !== undefined) {
+    await ensureOrderFlowSchema();
+    data = { ...data, shop_lat: cleanCoord(data.shop_lat, 90), shop_lng: cleanCoord(data.shop_lng, 180) };
+  }
   const fields = [];
   const values = [];
   let idx = 1;

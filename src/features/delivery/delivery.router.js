@@ -7,6 +7,8 @@ const router = Router();
 // the same code printed in their ID card QR.
 router.get('/qr', ctrl.getQr);
 router.get('/offers', ctrl.listOffers);
+// Rider app posts { lat, lng } here every ~10 s so customers can follow the ride.
+router.post('/location', ctrl.updateLocation);
 router.post('/offers/:orderId/accept', ctrl.acceptOffer);
 router.post('/offers/:orderId/decline', ctrl.declineOffer);
 

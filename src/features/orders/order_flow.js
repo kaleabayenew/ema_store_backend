@@ -44,6 +44,12 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_code VARCHAR(20)`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted_at TIMESTAMP`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_rejected_at TIMESTAMPTZ`);
+      // Live tracking: last GPS fix reported by the rider app, and the shop pin.
+      await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION`);
+      await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION`);
+      await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_location_at TIMESTAMP WITH TIME ZONE`);
+      await db.query(`ALTER TABLE IF EXISTS partner_profile ADD COLUMN IF NOT EXISTS shop_lat DOUBLE PRECISION`);
+      await db.query(`ALTER TABLE IF EXISTS partner_profile ADD COLUMN IF NOT EXISTS shop_lng DOUBLE PRECISION`);
       await db.query(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_delivery_code
          ON orders(delivery_code) WHERE delivery_code IS NOT NULL`,
@@ -207,6 +213,31 @@ function generateDeliveryCode() {
   return out;
 }
 
+// ── Map pins ────────────────────────────────────────────────────────────────
+
+/**
+ * Parses the pin embedded in a customer's shipping address by the app, e.g.
+ * "Bole, Addis (Pin: 9.03420,38.74690 (https://maps.google.com/?q=...))".
+ * Returns { lat, lng } or { lat: null, lng: null } when there is no valid pin.
+ */
+function parseAddressPin(address) {
+  const m = /Pin:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i.exec(String(address || ''));
+  if (!m) return { lat: null, lng: null };
+  const lat = parseFloat(m[1]);
+  const lng = parseFloat(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { lat: null, lng: null };
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return { lat: null, lng: null };
+  return { lat, lng };
+}
+
+/** Returns a finite, in-range number or null. */
+function cleanCoord(value, limit) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || Math.abs(n) > limit) return null;
+  return n;
+}
+
 // ── Phone masking ───────────────────────────────────────────────────────────
 
 /** +251912345678 → "+251 91 **** 678" (keeps country code + 2 digits). */
@@ -292,6 +323,8 @@ module.exports = {
   generateDeliveryCode,
   maskPhoneNumber,
   maskPhone: maskPhoneNumber,
+  parseAddressPin,
+  cleanCoord,
   resolveDeliveryAgent,
   safeSendNotification,
 };
