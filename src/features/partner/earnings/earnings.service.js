@@ -7,7 +7,7 @@ async function getEarnings(partnerId) {
     // Total revenue from completed/delivered order items
     pool.query(
       `SELECT COALESCE(SUM(
-         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity
        ), 0)::bigint AS total_revenue
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -18,7 +18,7 @@ async function getEarnings(partnerId) {
     // This month
     pool.query(
       `SELECT COALESCE(SUM(
-         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity
        ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -31,7 +31,7 @@ async function getEarnings(partnerId) {
     // Last month
     pool.query(
       `SELECT COALESCE(SUM(
-         ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity
        ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -43,9 +43,9 @@ async function getEarnings(partnerId) {
     ),
     // Pending payout from wallet — amount is stored as-is (same unit as revenue cents)
     pool.query(
-      `SELECT COALESCE(SUM(ABS(amount)), 0)::bigint AS pending
+      `SELECT COALESCE(SUM(ABS(amount)) * 100, 0)::bigint AS pending
        FROM wallet_transactions
-       WHERE user_id = $1 AND type = 'PAYOUT_REQUEST' AND status = 'PENDING'`,
+       WHERE user_id = $1 AND type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST') AND status = 'PENDING'`,
       [partnerId],
     ),
     // Weekly earnings chart — last 4 ISO weeks (Mon–Sun), revenue in cents
@@ -53,7 +53,7 @@ async function getEarnings(partnerId) {
       `SELECT
          DATE_TRUNC('week', o.created_at)::date AS week_start,
          COALESCE(SUM(
-           ROUND(COALESCE(oi.price_at_order, 0) * 100) * oi.quantity
+           COALESCE(oi.price_at_order, 0) * oi.quantity
          ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -100,9 +100,42 @@ async function getTransactions(partnerId, { page = 1, limit = 20 } = {}) {
   return { transactions: rows, total: countRows[0].total, page, limit };
 }
 
+// Available balance in cents = delivered revenue (cents) − pending payouts
+// (wallet_transactions.amount is ETB, so it is converted ×100).
+async function availableBalanceCents(partnerId) {
+  const [rev, pend] = await Promise.all([
+    pool.query(
+      `SELECT COALESCE(SUM(COALESCE(oi.price_at_order, 0) * oi.quantity), 0)::bigint AS total
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1 AND o.status IN ('DELIVERED', 'COMPLETED')`,
+      [partnerId],
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(ABS(amount)) * 100, 0)::bigint AS pending
+       FROM wallet_transactions
+       WHERE user_id = $1 AND type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST') AND status = 'PENDING'`,
+      [partnerId],
+    ),
+  ]);
+  return Math.max(
+    0,
+    Number(rev.rows[0]?.total ?? 0) - Number(pend.rows[0]?.pending ?? 0),
+  );
+}
+
 async function requestPayout(partnerId, amount, details = {}) {
   if (!amount || amount <= 0) {
     throw new AppError('Invalid payout amount.', 400, 'INVALID_AMOUNT');
+  }
+  const availableEtb = (await availableBalanceCents(partnerId)) / 100;
+  if (amount > availableEtb + 0.005) {
+    throw new AppError(
+      `Amount exceeds your available balance (ETB ${availableEtb.toFixed(2)}).`,
+      400,
+      'INSUFFICIENT_BALANCE',
+    );
   }
 
   const method = details.method === 'telebirr' ? 'telebirr' : 'bank';
@@ -125,6 +158,14 @@ async function requestTransfer(partnerId, { amount, recipientPhone, method, acco
   }
   if (!recipientPhone && !accountNumber) {
     throw new AppError('Recipient phone or account number is required.', 400, 'MISSING_FIELDS');
+  }
+  const availableEtb = (await availableBalanceCents(partnerId)) / 100;
+  if (amount > availableEtb + 0.005) {
+    throw new AppError(
+      `Amount exceeds your available balance (ETB ${availableEtb.toFixed(2)}).`,
+      400,
+      'INSUFFICIENT_BALANCE',
+    );
   }
 
   const isBank = method === 'bank';

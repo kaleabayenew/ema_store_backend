@@ -29,17 +29,17 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
     // This is what stops one guest from showing up as many users on the web.
     const existingRes = userId
       ? await client.query(
-          `SELECT * FROM support_tickets
+        `SELECT * FROM support_tickets
            WHERE user_id = $1 AND status <> 'CLOSED'
            ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,
-          [userId],
-        )
+        [userId],
+      )
       : await client.query(
-          `SELECT * FROM support_tickets
+        `SELECT * FROM support_tickets
            WHERE guest_id = $1 AND user_id IS NULL AND status <> 'CLOSED'
            ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,
-          [guestId],
-        );
+        [guestId],
+      );
 
     let ticket = existingRes.rows[0];
     const wasReused = !!ticket;
@@ -61,7 +61,7 @@ async function createTicket({ userId, guestId, subject, initialMessage, priority
       await client.query(`UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`, [ticket.id]);
     }
 
-    if (ticket && subject && subject.toLowerCase().includes('partner') && !ticket.subject.toLowerCase().includes('partner')) {
+    if (ticket && subject && (subject.toLowerCase().includes('partner') || subject.toLowerCase().includes('rider')) && !ticket.subject.toLowerCase().includes('partner') && !ticket.subject.toLowerCase().includes('rider')) {
       await client.query(`UPDATE support_tickets SET subject = $1 WHERE id = $2`, [subject, ticket.id]);
       ticket.subject = subject;
     }
@@ -132,7 +132,7 @@ async function claimGuestTickets(userId, guestId) {
 async function getCustomerTickets(userId, guestId) {
   const conds = [];
   const params = [];
-  if (userId)  { params.push(userId);  conds.push(`t.user_id = $${params.length}`); }
+  if (userId) { params.push(userId); conds.push(`t.user_id = $${params.length}`); }
   if (guestId) { params.push(guestId); conds.push(`t.guest_id = $${params.length}`); }
   if (conds.length === 0) return [];
 
@@ -187,9 +187,10 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
        COUNT(*) FILTER (WHERE t.status = 'IN_PROGRESS')::int         AS in_progress_count,
        COUNT(*) FILTER (WHERE t.status = 'RESOLVED')::int            AS resolved_count
      FROM support_tickets t
-     LEFT JOIN users u         ON u.id = t.user_id
-     LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN users u            ON u.id = t.user_id
+     LEFT JOIN customer_user cu   ON cu.user_id = t.user_id
      LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
+     LEFT JOIN delivery_agents da ON (da.id = t.user_id OR da.agent_code = REPLACE(t.guest_id, 'rider_', '') OR t.guest_id = da.id::text)
      ${where}`,
     params,
   );
@@ -200,8 +201,18 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
        t.id, t.subject, t.status, t.priority, t.created_at, t.updated_at,
        u.role                          AS user_role,
        pp.shop_name                    AS shop_name,
-       COALESCE(pp.shop_name, cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
-       u.phone                         AS customer_phone,
+       da.agent_code                   AS agent_code,
+       da.full_name                    AS agent_name,
+       da.vehicle_type                 AS vehicle_type,
+       COALESCE(
+         pp.shop_name,
+         da.full_name,
+         cu.full_name,
+         u.phone,
+         CASE WHEN t.guest_id LIKE 'rider_%' THEN 'Rider (' || REPLACE(t.guest_id, 'rider_', '') || ')'
+              ELSE 'Guest ' || RIGHT(t.guest_id, 6) END
+       ) AS customer_name,
+       COALESCE(u.phone, da.phone)     AS customer_phone,
        t.guest_id                      AS guest_id,
        COUNT(m.id)::int                AS message_count,
        -- unread for the admin = customer messages (is_staff = false) not yet read
@@ -215,9 +226,10 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
      LEFT JOIN users u              ON u.id = t.user_id
      LEFT JOIN customer_user cu     ON cu.user_id = t.user_id
      LEFT JOIN partner_profile pp   ON pp.user_id = t.user_id
+     LEFT JOIN delivery_agents da   ON (da.id = t.user_id OR da.agent_code = REPLACE(t.guest_id, 'rider_', '') OR t.guest_id = da.id::text)
      LEFT JOIN support_messages m   ON m.ticket_id = t.id
      ${where}
-     GROUP BY t.id, cu.full_name, u.phone, u.role, pp.shop_name
+     GROUP BY t.id, cu.full_name, u.phone, u.role, pp.shop_name, da.agent_code, da.full_name, da.vehicle_type, da.phone
      ORDER BY
        CASE t.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
        latest_activity DESC
@@ -227,29 +239,33 @@ async function listTickets({ status, search, page = 1, limit = 20, userId, isAdm
 
   return {
     tickets: rows.map((r) => {
-      const isPartner = r.user_role === 'PARTNER' || !!r.shop_name || (r.subject && r.subject.toLowerCase().includes('partner'));
+      const isRider = r.user_role === 'RIDER' || !!r.agent_code || (r.subject && (r.subject.toLowerCase().includes('rider') || r.subject.toLowerCase().includes('delivery'))) || (r.guest_id && r.guest_id.startsWith('rider_'));
+      const isPartner = !isRider && (r.user_role === 'PARTNER' || !!r.shop_name || (r.subject && r.subject.toLowerCase().includes('partner')));
       return {
-        id:            r.id,
-        subject:       r.subject,
-        status:        r.status,
-        priority:      r.priority,
-        customerName:  r.customer_name ?? (isPartner ? 'Partner' : 'Guest'),
+        id: r.id,
+        subject: r.subject,
+        status: r.status,
+        priority: r.priority,
+        customerName: r.customer_name ?? (isRider ? 'Rider' : isPartner ? 'Partner' : 'Guest'),
         customerPhone: r.customer_phone ?? '',
-        guestId:       r.guest_id ?? null,
-        isGuest:       !r.customer_phone && !!r.guest_id,
-        isPartner:     isPartner,
-        userRole:      r.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER'),
-        shopName:      r.shop_name ?? null,
-        messageCount:  r.message_count,
-        unreadCount:   r.unread_count,
-        createdAt:     r.created_at,
-        updatedAt:     r.updated_at,
+        guestId: r.guest_id ?? null,
+        isGuest: !r.customer_phone && !!r.guest_id,
+        isPartner: isPartner,
+        isRider: isRider,
+        userRole: isRider ? 'RIDER' : (r.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER')),
+        shopName: r.shop_name ?? null,
+        agentCode: r.agent_code ?? (r.guest_id?.startsWith('rider_') ? r.guest_id.replace('rider_', '') : null),
+        vehicleType: r.vehicle_type ?? null,
+        messageCount: r.message_count,
+        unreadCount: r.unread_count,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
       };
     }),
-    total:      parseInt(agg.total),
-    open:       parseInt(agg.open_count),
+    total: parseInt(agg.total),
+    open: parseInt(agg.open_count),
     inProgress: parseInt(agg.in_progress_count),
-    resolved:   parseInt(agg.resolved_count),
+    resolved: parseInt(agg.resolved_count),
     totalPages: Math.max(1, Math.ceil(parseInt(agg.total) / limit)),
     page,
   };
@@ -263,13 +279,24 @@ async function getTicket(id) {
        t.*,
        u.role                          AS user_role,
        pp.shop_name                    AS shop_name,
-       COALESCE(pp.shop_name, cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
-       u.phone                         AS customer_phone,
+       da.agent_code                   AS agent_code,
+       da.full_name                    AS agent_name,
+       da.vehicle_type                 AS vehicle_type,
+       COALESCE(
+         pp.shop_name,
+         da.full_name,
+         cu.full_name,
+         u.phone,
+         CASE WHEN t.guest_id LIKE 'rider_%' THEN 'Rider (' || REPLACE(t.guest_id, 'rider_', '') || ')'
+              ELSE 'Guest ' || RIGHT(t.guest_id, 6) END
+       ) AS customer_name,
+       COALESCE(u.phone, da.phone)     AS customer_phone,
        u.email                         AS customer_email
      FROM support_tickets t
-     LEFT JOIN users u         ON u.id = t.user_id
-     LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN users u            ON u.id = t.user_id
+     LEFT JOIN customer_user cu   ON cu.user_id = t.user_id
      LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
+     LEFT JOIN delivery_agents da ON (da.id = t.user_id OR da.agent_code = REPLACE(t.guest_id, 'rider_', '') OR t.guest_id = da.id::text)
      WHERE t.id = $1`,
     [id],
   );
@@ -279,23 +306,27 @@ async function getTicket(id) {
     `SELECT m.id, m.body, m.is_staff, m.sent_at, m.read_at, m.guest_id, m.image_url,
             CASE
               WHEN m.is_staff = true THEN COALESCE(au.full_name, 'Support')
+              WHEN da.agent_code IS NOT NULL THEN COALESCE(da.full_name, 'Rider ' || da.agent_code)
               WHEN u.role = 'PARTNER' THEN COALESCE(pp.shop_name, 'Partner')
               ELSE COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(m.guest_id, 6), 'Customer')
             END AS sender_name,
-            u.role AS sender_role
+            u.role AS sender_role,
+            da.agent_code AS sender_agent_code
      FROM support_messages m
-     LEFT JOIN users u         ON u.id = m.sender_id
-     LEFT JOIN customer_user cu ON cu.user_id = m.sender_id
+     LEFT JOIN users u            ON u.id = m.sender_id
+     LEFT JOIN customer_user cu   ON cu.user_id = m.sender_id
      LEFT JOIN partner_profile pp ON pp.user_id = m.sender_id
-     LEFT JOIN admin_user au    ON au.user_id = m.sender_id
+     LEFT JOIN delivery_agents da ON (da.id = m.sender_id OR da.agent_code = REPLACE(m.guest_id, 'rider_', '') OR m.guest_id = da.id::text)
+     LEFT JOIN admin_user au      ON au.user_id = m.sender_id
      WHERE m.ticket_id = $1
      ORDER BY m.sent_at ASC`,
     [id],
   );
 
   const t = rows[0];
-  const isPartner = t.user_role === 'PARTNER' || !!t.shop_name || (t.subject && t.subject.toLowerCase().includes('partner'));
-  
+  const isRider = t.user_role === 'RIDER' || !!t.agent_code || (t.subject && (t.subject.toLowerCase().includes('rider') || t.subject.toLowerCase().includes('delivery'))) || (t.guest_id && t.guest_id.startsWith('rider_'));
+  const isPartner = !isRider && (t.user_role === 'PARTNER' || !!t.shop_name || (t.subject && t.subject.toLowerCase().includes('partner')));
+
   // Generate fresh presigned URLs for all images
   const messagesWithFreshUrls = await Promise.all(
     messages.map(async (m) => {
@@ -311,31 +342,35 @@ async function getTicket(id) {
       return m;
     })
   );
-  
+
   return {
-    id:            t.id,
-    subject:       t.subject,
-    status:        t.status,
-    priority:      t.priority,
-    customerName:  t.customer_name ?? (isPartner ? 'Partner' : 'Guest'),
+    id: t.id,
+    subject: t.subject,
+    status: t.status,
+    priority: t.priority,
+    customerName: t.customer_name ?? (isRider ? 'Rider' : isPartner ? 'Partner' : 'Guest'),
     customerPhone: t.customer_phone ?? '',
     customerEmail: t.customer_email ?? '',
-    guestId:       t.guest_id ?? null,
-    userId:        t.user_id ?? null,
-    isPartner:     isPartner,
-    userRole:      t.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER'),
-    shopName:      t.shop_name ?? null,
-    createdAt:     t.created_at,
-    updatedAt:     t.updated_at,
+    guestId: t.guest_id ?? null,
+    userId: t.user_id ?? null,
+    isPartner: isPartner,
+    isRider: isRider,
+    userRole: isRider ? 'RIDER' : (t.user_role ?? (isPartner ? 'PARTNER' : 'CUSTOMER')),
+    shopName: t.shop_name ?? null,
+    agentCode: t.agent_code ?? (t.guest_id?.startsWith('rider_') ? t.guest_id.replace('rider_', '') : null),
+    vehicleType: t.vehicle_type ?? null,
+    createdAt: t.created_at,
+    updatedAt: t.updated_at,
     messages: messagesWithFreshUrls.map((m) => ({
-      id:         m.id,
-      body:       m.body,
-      isStaff:    m.is_staff === true,
+      id: m.id,
+      body: m.body,
+      isStaff: m.is_staff === true,
       senderName: m.sender_name,
-      sentAt:     m.sent_at,
-      readAt:     m.read_at,
-      imageUrl:   m.image_url || null,
-      isPartner:  m.sender_role === 'PARTNER' || (!m.is_staff && isPartner),
+      sentAt: m.sent_at,
+      readAt: m.read_at,
+      imageUrl: m.image_url || null,
+      isPartner: !isRider && (m.sender_role === 'PARTNER' || (!m.is_staff && isPartner)),
+      isRider: isRider || m.sender_role === 'RIDER' || !!m.sender_agent_code,
     })),
   };
 }
@@ -352,7 +387,7 @@ async function addReply(ticketId, { senderId, guestId, body, imageUrl, isStaff =
   if (!isStaff) {
     // Customers may only write to their own ticket
     const owns = (senderId && ticket.user_id === senderId) ||
-                 (guestId && ticket.guest_id && ticket.guest_id === guestId);
+      (guestId && ticket.guest_id && ticket.guest_id === guestId);
     if (!owns) throw new AppError('Not allowed to reply to this ticket', 403, 'FORBIDDEN');
     if (ticket.status === 'CLOSED') throw new AppError('This ticket is closed', 400, 'TICKET_CLOSED');
   }
@@ -410,9 +445,9 @@ async function getSupportSettings() {
   const { rows } = await pool.query(`SELECT * FROM support_settings WHERE id = 'default'`);
   const r = rows[0] || {};
   return {
-    welcomeMessage:    r.welcome_message     || 'Hello! How can we help you today?',
+    welcomeMessage: r.welcome_message || 'Hello! How can we help you today?',
     isAutoReplyEnabled: r.is_auto_reply_enabled ?? true,
-    quickStarters:     r.quick_starters      || [],
+    quickStarters: r.quick_starters || [],
   };
 }
 
@@ -439,9 +474,9 @@ async function listDefaultMessages() {
      ORDER BY sort_order ASC, created_at ASC`,
   );
   return rows.map((r) => ({
-    id:        r.id,
-    title:     r.title,
-    body:      r.body,
+    id: r.id,
+    title: r.title,
+    body: r.body,
     sortOrder: r.sort_order,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -464,8 +499,8 @@ async function updateDefaultMessage(id, { title, body, sortOrder }) {
   const params = [];
   let idx = 1;
 
-  if (title !== undefined) { sets.push(`title = $${idx++}`);      params.push(title); }
-  if (body  !== undefined) { sets.push(`body = $${idx++}`);       params.push(body); }
+  if (title !== undefined) { sets.push(`title = $${idx++}`); params.push(title); }
+  if (body !== undefined) { sets.push(`body = $${idx++}`); params.push(body); }
   if (sortOrder !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(sortOrder); }
 
   if (sets.length === 0) throw new AppError('No fields to update', 400, 'BAD_REQUEST');
@@ -534,8 +569,10 @@ async function listConversationHistory({ staffId, status, dateFrom, dateTo, sear
   const countRes = await pool.query(
     `SELECT COUNT(DISTINCT t.id)::int AS total
      FROM support_tickets t
-     LEFT JOIN users u          ON u.id = t.user_id
-     LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN users u            ON u.id = t.user_id
+     LEFT JOIN customer_user cu   ON cu.user_id = t.user_id
+     LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
+     LEFT JOIN delivery_agents da ON (da.id = t.user_id OR da.agent_code = REPLACE(t.guest_id, 'rider_', '') OR t.guest_id = da.id::text)
      ${staffJoin}
      ${where}`,
     params,
@@ -545,8 +582,18 @@ async function listConversationHistory({ staffId, status, dateFrom, dateTo, sear
   const { rows } = await pool.query(
     `SELECT
        t.id, t.subject, t.status, t.priority, t.created_at, t.updated_at,
-       COALESCE(cu.full_name, u.phone, 'Guest ' || RIGHT(t.guest_id, 6)) AS customer_name,
-       u.phone                                    AS customer_phone,
+       u.role                          AS user_role,
+       pp.shop_name                    AS shop_name,
+       da.agent_code                   AS agent_code,
+       COALESCE(
+         pp.shop_name,
+         da.full_name,
+         cu.full_name,
+         u.phone,
+         CASE WHEN t.guest_id LIKE 'rider_%' THEN 'Rider (' || REPLACE(t.guest_id, 'rider_', '') || ')'
+              ELSE 'Guest ' || RIGHT(t.guest_id, 6) END
+       ) AS customer_name,
+       COALESCE(u.phone, da.phone)     AS customer_phone,
        COUNT(DISTINCT m.id)::int                  AS total_messages,
        COUNT(DISTINCT m.id) FILTER (WHERE m.is_staff = true)::int AS staff_messages,
        COUNT(DISTINCT m.id) FILTER (WHERE m.is_staff = false)::int AS customer_messages,
@@ -561,33 +608,42 @@ async function listConversationHistory({ staffId, status, dateFrom, dateTo, sear
         WHERE lm.ticket_id = t.id AND lm.is_staff = true
         ORDER BY lm.sent_at DESC LIMIT 1)          AS last_staff_at
      FROM support_tickets t
-     LEFT JOIN users u          ON u.id = t.user_id
-     LEFT JOIN customer_user cu ON cu.user_id = t.user_id
+     LEFT JOIN users u            ON u.id = t.user_id
+     LEFT JOIN customer_user cu   ON cu.user_id = t.user_id
+     LEFT JOIN partner_profile pp ON pp.user_id = t.user_id
+     LEFT JOIN delivery_agents da ON (da.id = t.user_id OR da.agent_code = REPLACE(t.guest_id, 'rider_', '') OR t.guest_id = da.id::text)
      LEFT JOIN support_messages m ON m.ticket_id = t.id
      ${staffJoin}
      ${where}
-     GROUP BY t.id, cu.full_name, u.phone
+     GROUP BY t.id, cu.full_name, u.phone, u.role, pp.shop_name, da.agent_code, da.full_name, da.phone
      ORDER BY t.updated_at DESC
      LIMIT $${idx} OFFSET $${idx + 1}`,
     [...params, limit, offset],
   );
 
   return {
-    tickets: rows.map((r) => ({
-      id:               r.id,
-      subject:          r.subject,
-      status:           r.status,
-      priority:         r.priority,
-      customerName:     r.customer_name ?? 'Unknown',
-      customerPhone:    r.customer_phone ?? '',
-      totalMessages:    r.total_messages,
-      staffMessages:    r.staff_messages,
-      customerMessages: r.customer_messages,
-      lastStaffName:    r.last_staff_name ?? null,
-      lastStaffAt:      r.last_staff_at ?? null,
-      createdAt:        r.created_at,
-      updatedAt:        r.updated_at,
-    })),
+    tickets: rows.map((r) => {
+      const isRider = r.user_role === 'RIDER' || !!r.agent_code || (r.subject && (r.subject.toLowerCase().includes('rider') || r.subject.toLowerCase().includes('delivery')));
+      const isPartner = !isRider && (r.user_role === 'PARTNER' || !!r.shop_name || (r.subject && r.subject.toLowerCase().includes('partner')));
+      return {
+        id: r.id,
+        subject: r.subject,
+        status: r.status,
+        priority: r.priority,
+        customerName: r.customer_name ?? (isRider ? 'Rider' : isPartner ? 'Partner' : 'Unknown'),
+        customerPhone: r.customer_phone ?? '',
+        isPartner: isPartner,
+        isRider: isRider,
+        agentCode: r.agent_code ?? null,
+        totalMessages: r.total_messages,
+        staffMessages: r.staff_messages,
+        customerMessages: r.customer_messages,
+        lastStaffName: r.last_staff_name ?? null,
+        lastStaffAt: r.last_staff_at ?? null,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      };
+    }),
     total,
     page,
     totalPages: Math.max(1, Math.ceil(total / limit)),
@@ -619,7 +675,7 @@ async function listStaffUsers() {
  */
 async function markMessagesRead(ticketId, { byStaff = true, userId, guestId } = {}) {
   const targetIsStaff = !byStaff; // the messages being marked read
-  
+
   // Ownership check for customers/guests
   if (!byStaff) {
     const { rows: tRows } = await pool.query(
@@ -629,10 +685,10 @@ async function markMessagesRead(ticketId, { byStaff = true, userId, guestId } = 
     if (tRows.length === 0) throw new AppError('Ticket not found', 404, 'NOT_FOUND');
     const ticket = tRows[0];
     const owns = (userId && ticket.user_id === userId) ||
-                 (guestId && ticket.guest_id && ticket.guest_id === guestId);
+      (guestId && ticket.guest_id && ticket.guest_id === guestId);
     if (!owns) throw new AppError('Not allowed to mark this ticket as read', 403, 'FORBIDDEN');
   }
-  
+
   await pool.query(
     `UPDATE support_messages
      SET read_at = NOW()
@@ -653,11 +709,11 @@ async function recordTyping(ticketId, { isStaff, userId, guestId }) {
       if (tRows.length > 0) {
         const ticket = tRows[0];
         const owns = (userId && ticket.user_id === userId) ||
-                     (guestId && ticket.guest_id && ticket.guest_id === guestId);
+          (guestId && ticket.guest_id && ticket.guest_id === guestId);
         if (!owns) return; // Silently ignore typing from non-owners
       }
     }
-    
+
     await pool.query(
       `INSERT INTO support_typing (ticket_id, is_staff, typed_at)
        VALUES ($1, $2, NOW())
@@ -715,7 +771,7 @@ async function getPreviousTicketsForCustomer(userId, guestId, currentTicketId) {
   const conds = [];
   const params = [];
   let idx = 1;
-  
+
   if (userId) {
     conds.push(`t.user_id = $${idx++}`);
     params.push(userId);
@@ -724,12 +780,12 @@ async function getPreviousTicketsForCustomer(userId, guestId, currentTicketId) {
     conds.push(`t.guest_id = $${idx++}`);
     params.push(guestId);
   }
-  
+
   if (currentTicketId) {
     conds.push(`t.id != $${idx++}`);
     params.push(currentTicketId);
   }
-  
+
   const { rows } = await pool.query(
     `SELECT t.id, t.subject, t.status, t.created_at, t.updated_at,
             COUNT(m.id)::int AS message_count
@@ -741,7 +797,7 @@ async function getPreviousTicketsForCustomer(userId, guestId, currentTicketId) {
      LIMIT 5`,
     params,
   );
-  
+
   return rows.map((r) => ({
     id: r.id,
     subject: r.subject,

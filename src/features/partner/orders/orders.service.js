@@ -165,7 +165,7 @@ async function getOrders(partnerId, { page = 1, limit = 50, status } = {}) {
               COALESCE(SUM(order_items.quantity), 1)::int AS item_count
        ${ORDER_JOINS}
        WHERE products.partner_id = $1 ${statusClause}
-       GROUP BY orders.id, da.id
+       GROUP BY orders.id, da.id, da.agent_code, da.full_name, da.phone
        ORDER BY orders.created_at DESC
        LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
       queryParams,
@@ -186,7 +186,7 @@ async function fetchOrder(partnerId, orderId) {
     `SELECT ${ORDER_SELECT}
      ${ORDER_JOINS}
      WHERE orders.id = $1 AND products.partner_id = $2
-     GROUP BY orders.id, da.id`,
+     GROUP BY orders.id, da.id, da.agent_code, da.full_name, da.phone`,
     [orderId, partnerId],
   );
   if (rows.length === 0) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');

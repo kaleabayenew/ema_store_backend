@@ -5,7 +5,22 @@ const { ensureOrderFlowSchema, cleanCoord } = require('../../orders/order_flow')
 async function getProfile(userId) {
   const { rows } = await pool.query(
     `SELECT pp.*,
-       COALESCE((SELECT SUM(amount) FROM wallet_transactions WHERE user_id = $1), 0)::bigint AS balance_cents
+       GREATEST(0,
+         COALESCE((
+           SELECT SUM(COALESCE(oi.price_at_order, 0) * oi.quantity)
+           FROM order_items oi
+           JOIN products p ON p.id = oi.product_id
+           JOIN orders o ON o.id = oi.order_id
+           WHERE p.partner_id = $1 AND o.status IN ('DELIVERED', 'COMPLETED')
+         ), 0)::bigint
+         - COALESCE((
+           SELECT SUM(ABS(wt.amount)) * 100
+           FROM wallet_transactions wt
+           WHERE wt.user_id = $1
+             AND wt.type IN ('PAYOUT_REQUEST', 'TRANSFER_REQUEST')
+             AND wt.status = 'PENDING'
+         ), 0)::bigint
+       ) AS balance_cents
      FROM partner_profile pp WHERE pp.user_id = $1`,
     [userId],
   );
