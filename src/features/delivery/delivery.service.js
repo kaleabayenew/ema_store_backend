@@ -101,7 +101,7 @@ async function listOffers(rawCode) {
      ) sp ON true
      LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
      WHERE o.delivery_agent_id IS NULL
-       AND o.status IN ('CONFIRMED', 'PACKED')
+       AND o.status IN ('CONFIRMED', 'PROCESSING', 'PACKED')
      ORDER BY o.created_at DESC
      LIMIT 50`,
   );
