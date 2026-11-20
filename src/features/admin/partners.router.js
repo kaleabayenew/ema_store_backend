@@ -30,7 +30,9 @@ router.delete('/feedback/:id', adminOnly, communityCtrl.deleteFeedback);
 // Delivery agents (ride riders)
 router.get('/agents', agentsCtrl.listAgents);
 router.post('/agents', adminOnly, agentsCtrl.createAgent);
+router.get('/agents/:id', agentsCtrl.getAgent);
 router.patch('/agents/:id/status', adminOnly, agentsCtrl.setAgentStatus);
+router.post('/agents/:id/reset-password', adminOnly, agentsCtrl.resetAgentPassword);
 
 // Partners
 router.get('/partners', partnerCtrl.getAllPartners);

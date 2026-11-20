@@ -1,7 +1,10 @@
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { ok, created } = require('../../core/utils/response');
 const { AppError } = require('../../core/errors/app_error');
 const { pool } = require('../../core/config/database');
 const { ensureOrderFlowSchema } = require('../orders/order_flow');
+const { ensureAgentAuthSchema } = require('../agent_auth/agent_auth.service');
 
 // ── GET /api/v1/admin/agents
 // Lists delivery agents (ride riders) with live delivery stats.
@@ -154,4 +157,108 @@ const setAgentStatus = async (req, res, next) => {
   }
 };
 
-module.exports = { listAgents, createAgent, setAgentStatus };
+// ── GET /api/v1/admin/agents/:id
+// Full rider profile for the admin "view details" dialog.
+// NOTE: password_hash is intentionally never selected or returned.
+const getAgent = async (req, res, next) => {
+  try {
+    await ensureAgentAuthSchema();
+    const { rows } = await pool.query(
+      `SELECT id, agent_code, full_name, phone, is_active, created_at,
+              national_id, license_number, vehicle_type, plate_number,
+              emergency_contact, emergency_national_id, approval_status,
+              last_lat, last_lng, last_location_at
+       FROM delivery_agents WHERE id = $1`,
+      [req.params.id],
+    );
+    const a = rows[0];
+    if (!a) throw new AppError('Agent not found.', 404, 'AGENT_NOT_FOUND');
+
+    // Live delivery stats — same aggregates as listAgents.
+    const { rows: statRows } = await pool.query(
+      `SELECT COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL)::int AS completed_deliveries,
+              COUNT(o.id) FILTER (WHERE o.delivered_at IS NULL
+                                   AND o.status IN ('CONFIRMED','PACKED','SHIPPED'))::int AS active_deliveries,
+              COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL
+                                   AND o.delivered_at::date = CURRENT_DATE)::int AS deliveries_today,
+              MAX(o.delivered_at) AS last_delivery_at
+       FROM orders o WHERE o.delivery_agent_id = $1`,
+      [a.id],
+    );
+    const s = statRows[0] || {};
+    const ONLINE_WINDOW_MS = 3 * 60 * 1000;
+    const lastLocationAt = a.last_location_at ? new Date(a.last_location_at) : null;
+    const isOnline =
+      lastLocationAt !== null &&
+      Date.now() - lastLocationAt.getTime() < ONLINE_WINDOW_MS;
+
+    ok(res, {
+      agent: {
+        id: a.id,
+        agentCode: a.agent_code,
+        fullName: a.full_name,
+        phone: a.phone || null,
+        isActive: a.is_active !== false,
+        createdAt: a.created_at,
+        nationalId: a.national_id || null,
+        licenseNumber: a.license_number || null,
+        vehicleType: a.vehicle_type || null,
+        plateNumber: a.plate_number || null,
+        emergencyContact: a.emergency_contact || null,
+        emergencyNationalId: a.emergency_national_id || null,
+        approvalStatus: a.approval_status || 'APPROVED',
+        isOnline,
+        lastLat: a.last_lat,
+        lastLng: a.last_lng,
+        lastLocationAt: a.last_location_at,
+        completedDeliveries: s.completed_deliveries || 0,
+        activeDeliveries: s.active_deliveries || 0,
+        deliveriesToday: s.deliveries_today || 0,
+        lastDeliveryAt: s.last_delivery_at,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── POST /api/v1/admin/agents/:id/reset-password
+// Sets a new password for the rider. If the body has no password, a
+// temporary one is generated and returned ONCE — it is never retrievable
+// afterwards because only the bcrypt hash is stored.
+const resetAgentPassword = async (req, res, next) => {
+  try {
+    await ensureAgentAuthSchema();
+    const { rows } = await pool.query(
+      `SELECT id, agent_code, full_name FROM delivery_agents WHERE id = $1`,
+      [req.params.id],
+    );
+    const agent = rows[0];
+    if (!agent) throw new AppError('Agent not found.', 404, 'AGENT_NOT_FOUND');
+
+    let password = String(req.body?.password || '').trim();
+    if (password) {
+      if (password.length < 6) {
+        throw new AppError('Password must be at least 6 characters.', 400, 'PASSWORD_TOO_SHORT');
+      }
+    } else {
+      // Readable temporary password: rider can change it after first login.
+      password = `Rdr-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `UPDATE delivery_agents SET password_hash = $2 WHERE id = $1`,
+      [agent.id, hash],
+    );
+
+    ok(res, {
+      agent: { id: agent.id, agentCode: agent.agent_code, fullName: agent.full_name },
+      temporaryPassword: password,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { listAgents, createAgent, setAgentStatus, getAgent, resetAgentPassword };

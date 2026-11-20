@@ -63,8 +63,28 @@ async function updateAgentLocation(rawCode, lat, lng) {
   return { ok: true, updatedAt: new Date().toISOString() };
 }
 
+/**
+ * Auto-release orders a rider accepted but never picked up — the partner
+ * handover was never confirmed, so after 24h the assignment is stale.
+ * Without this the rider stays "busy" forever and the order never
+ * returns to the offer pool.
+ */
+async function releaseStalePickups() {
+  await pool.query(
+    `UPDATE orders
+        SET delivery_agent_id = NULL,
+            delivery_accepted_at = NULL,
+            updated_at = NOW()
+      WHERE delivery_agent_id IS NOT NULL
+        AND handed_over_at IS NULL
+        AND delivered_at IS NULL
+        AND delivery_accepted_at < NOW() - INTERVAL '24 hours'`,
+  );
+}
+
 async function listOffers(rawCode) {
   await ensureOrderFlowSchema();
+  await releaseStalePickups();
   const agent = await findAgent(rawCode);
 
   const { rows } = await pool.query(
@@ -281,6 +301,7 @@ async function declineOffer(rawCode, orderId) {
  */
 async function getActiveDelivery(rawCode) {
   await ensureOrderFlowSchema();
+  await releaseStalePickups();
   const agent = await findAgent(rawCode);
 
   const { rows } = await pool.query(
