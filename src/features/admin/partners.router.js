@@ -38,6 +38,7 @@ router.post('/agents/:id/reset-password', adminOnly, agentsCtrl.resetAgentPasswo
 router.get('/partners', partnerCtrl.getAllPartners);
 router.get('/partners/:id', partnerCtrl.getPartnerById);
 router.patch('/partners/:id/status', requireSuperAdmin, partnerCtrl.updatePartnerStatus);
+router.post('/partners/:id/reset-password', adminOnly, partnerCtrl.resetPartnerPassword);
 
 // Orders
 router.get('/orders', orderCtrl.getAllOrders);

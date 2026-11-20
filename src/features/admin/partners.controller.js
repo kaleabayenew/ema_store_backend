@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { ok, error } = require('../../core/utils/response');
 const { AppError } = require('../../core/errors/app_error');
 const { pool } = require('../../core/config/database');
@@ -194,8 +196,54 @@ const updatePartnerStatus = async (req, res, next) => {
   }
 };
 
+// ── POST /api/v1/admin/partners/:id/reset-password
+// Sets a new password on the partner's users row (partner_profile.id is the
+// route param). If the body has no password, a temporary one is generated and
+// returned ONCE — only the bcrypt hash is stored.
+const resetPartnerPassword = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT pp.id, pp.user_id, pp.business_name, pp.owner_name, u.phone
+       FROM partner_profile pp
+       JOIN users u ON u.id = pp.user_id
+       WHERE pp.id = $1`,
+      [req.params.id],
+    );
+    const partner = rows[0];
+    if (!partner) throw new AppError('Partner not found', 404, 'NOT_FOUND');
+
+    let password = String(req.body?.password || '').trim();
+    if (password) {
+      if (password.length < 6) {
+        throw new AppError('Password must be at least 6 characters.', 400, 'PASSWORD_TOO_SHORT');
+      }
+    } else {
+      password = `Prt-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`,
+      [partner.user_id, hash],
+    );
+
+    ok(res, {
+      partner: {
+        id: partner.id,
+        shop: partner.business_name,
+        owner: partner.owner_name,
+        phone: partner.phone,
+      },
+      temporaryPassword: password,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAllPartners,
   getPartnerById,
   updatePartnerStatus,
+  resetPartnerPassword,
 };
