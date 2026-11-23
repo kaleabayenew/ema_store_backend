@@ -1548,4 +1548,17 @@ setTimeout(() => {
   );
 }, 20 * 1000).unref();
 
+// ── Overdue deliveries: alert admins once per order, every 60s ───────────────
+const { processOverdueDeliveries } = require('./features/delivery/delivery.service');
+setInterval(() => {
+  processOverdueDeliveries().catch((err) =>
+    console.error('[delivery] overdue alert scheduler failed:', err.message || err.code || err),
+  );
+}, 60 * 1000).unref();
+setTimeout(() => {
+  processOverdueDeliveries().catch((err) =>
+    console.error('[delivery] overdue startup sweep failed:', err.message || err.code || err),
+  );
+}, 20 * 1000).unref();
+
 module.exports = app;
