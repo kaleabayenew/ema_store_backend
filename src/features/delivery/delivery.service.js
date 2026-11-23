@@ -1,6 +1,7 @@
 const { pool } = require('../../core/config/database');
 const { AppError } = require('../../core/errors/app_error');
 const { encryptAgentCode, createAgentDisplayCode } = require('./agent_qr');
+const { getOfferAcceptanceBlock } = require('./offer_rules');
 const {
   ensureOrderFlowSchema,
   decryptDynamicToken,
@@ -126,8 +127,8 @@ async function listOffers(rawCode) {
   }
 
   const { rows } = await pool.query(
-    `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
-            o.delivery_code, o.status, o.created_at,
+    `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.payment_status,
+            o.shipping_address, o.delivery_code, o.status, o.created_at,
             o.delivery_fee_cents,
             o.rider_commission_cents,
             COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
@@ -141,9 +142,10 @@ async function listOffers(rawCode) {
      ) sp ON true
      LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
      WHERE o.delivery_agent_id IS NULL
-       AND o.status IN ('CONFIRMED', 'PROCESSING', 'PACKED')
-     ORDER BY o.created_at DESC
-     LIMIT 50`,
+       AND UPPER(TRIM(COALESCE(o.status, ''))) NOT IN (
+         'CANCELLED', 'CANCELED', 'DELIVERED', 'COMPLETED', 'RETURNED', 'REFUNDED', 'FAILED'
+       )
+     ORDER BY o.created_at DESC`,
   );
 
   const orderIds = rows.map((r) => r.id);
@@ -187,57 +189,64 @@ async function listOffers(rawCode) {
           name: 'Delivery Rider',
           phone: null,
         },
-    offers: rows.map((r) => ({
-      id: r.id,
-      orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
-      totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
-      paymentMethod: r.payment_method || '',
-      shippingAddress: r.shipping_address || '',
-      dropoffLat: parseAddressPin(r.shipping_address).lat,
-      dropoffLng: parseAddressPin(r.shipping_address).lng,
-      deliveryCode: r.delivery_code || null,
-      status: r.status,
-      deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
-      // Net amount the rider actually earns (fee minus platform commission).
-      riderEarningCents: (() => {
-        const fee = Number(r.delivery_fee_cents) || 0;
-        if (fee <= 0) return null;
-        return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
-      })(),
-      // Step 3 Privacy: customer name/phone and shop phone hidden until accept
-      customerName: null,
-      customerPhone: null,
-      shopPhone: null,
-      shopName: r.shop_name || 'Ema Store Partner',
-      shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
-      items: itemsByOrder[r.id] || [],
-      // Multi-shop orders: one leg per partner location so the rider app
-      // can show each pickup point separately.
-      legs: (() => {
-        const byPartner = new Map();
-        for (const it of itemsByOrder[r.id] || []) {
-          const key = it.partnerId || it.shopName || 'unknown';
-          if (!byPartner.has(key)) {
-            byPartner.set(key, {
-              shopName: it.shopName || 'Ema Store Partner',
-              shopAddress: it.shopAddress || 'Addis Ababa, Ethiopia',
-              shopLat: it.shopLat ?? null,
-              shopLng: it.shopLng ?? null,
-              items: [],
-            });
+    offers: rows.map((r) => {
+      const acceptanceBlock = getOfferAcceptanceBlock(r);
+      return {
+        id: r.id,
+        orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
+        totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
+        paymentMethod: r.payment_method || '',
+        paymentStatus: r.payment_status || 'PENDING',
+        shippingAddress: acceptanceBlock ? '' : r.shipping_address || '',
+        dropoffLat: acceptanceBlock ? null : parseAddressPin(r.shipping_address).lat,
+        dropoffLng: acceptanceBlock ? null : parseAddressPin(r.shipping_address).lng,
+        deliveryCode: r.delivery_code || null,
+        status: r.status,
+        canAcceptOffer: acceptanceBlock === null,
+        acceptanceBlockCode: acceptanceBlock?.code || null,
+        acceptanceBlockReason: acceptanceBlock?.message || null,
+        deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+        // Net amount the rider actually earns (fee minus platform commission).
+        riderEarningCents: (() => {
+          const fee = Number(r.delivery_fee_cents) || 0;
+          if (fee <= 0) return null;
+          return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+        })(),
+        // Step 3 Privacy: customer name/phone and shop phone hidden until accept
+        customerName: null,
+        customerPhone: null,
+        shopPhone: null,
+        shopName: r.shop_name || 'Ema Store Partner',
+        shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
+        items: itemsByOrder[r.id] || [],
+        // Multi-shop orders: one leg per partner location so the rider app
+        // can show each pickup point separately.
+        legs: (() => {
+          const byPartner = new Map();
+          for (const it of itemsByOrder[r.id] || []) {
+            const key = it.partnerId || it.shopName || 'unknown';
+            if (!byPartner.has(key)) {
+              byPartner.set(key, {
+                shopName: it.shopName || 'Ema Store Partner',
+                shopAddress: it.shopAddress || 'Addis Ababa, Ethiopia',
+                shopLat: it.shopLat ?? null,
+                shopLng: it.shopLng ?? null,
+                items: [],
+              });
+            }
+            byPartner.get(key).items.push(`${it.name} x${it.quantity}`);
           }
-          byPartner.get(key).items.push(`${it.name} x${it.quantity}`);
-        }
-        return [...byPartner.values()].map((l) => ({
-          shopName: l.shopName,
-          shopAddress: l.shopAddress,
-          shopLat: l.shopLat,
-          shopLng: l.shopLng,
-          items: l.items,
-        }));
-      })(),
-      createdAt: r.created_at,
-    })),
+          return [...byPartner.values()].map((l) => ({
+            shopName: l.shopName,
+            shopAddress: l.shopAddress,
+            shopLat: l.shopLat,
+            shopLng: l.shopLng,
+            items: l.items,
+          }));
+        })(),
+        createdAt: r.created_at,
+      };
+    }),
   };
 
   for (const offer of result.offers) {
@@ -260,11 +269,25 @@ async function acceptOffer(rawCode, orderId) {
   try {
     await client.query('BEGIN');
 
+    // Serialize accepts per rider so concurrent requests cannot assign
+    // multiple orders to the same agent.
+    const { rows: agentRows } = await client.query(
+      `SELECT id, is_active FROM delivery_agents WHERE id = $1 FOR UPDATE`,
+      [agent.id],
+    );
+    if (!agentRows[0] || agentRows[0].is_active === false) {
+      throw new AppError(
+        'This delivery agent is not active.',
+        403,
+        'AGENT_INACTIVE',
+      );
+    }
+
     // 1. Check if this rider already holds an active order
     const { rows: activeRows } = await client.query(
       `SELECT id FROM orders
        WHERE delivery_agent_id = $1
-         AND status IN ('CONFIRMED', 'PACKED', 'SHIPPED')
+         AND status IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED')
          AND delivered_at IS NULL
        LIMIT 1`,
       [agent.id],
@@ -279,13 +302,23 @@ async function acceptOffer(rawCode, orderId) {
 
     // 2. Lock target order for update
     const { rows } = await client.query(
-      `SELECT id, status, delivery_agent_id, user_id, delivery_code
+      `SELECT id, status, payment_status, payment_method,
+              delivery_agent_id, user_id, delivery_code
        FROM orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
     const order = rows[0];
     if (!order) {
       throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    }
+
+    const acceptanceBlock = getOfferAcceptanceBlock(order);
+    if (acceptanceBlock) {
+      throw new AppError(
+        acceptanceBlock.message,
+        409,
+        acceptanceBlock.code,
+      );
     }
 
     // 3. Concurrency check: already taken?
@@ -425,7 +458,7 @@ async function getActiveDelivery(rawCode) {
      ) sp ON true
      LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
      WHERE o.delivery_agent_id = $1
-       AND o.status IN ('CONFIRMED', 'PACKED', 'SHIPPED')
+       AND o.status IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED')
        AND o.delivered_at IS NULL
      ORDER BY o.delivery_accepted_at DESC NULLS LAST
      LIMIT 1`,
