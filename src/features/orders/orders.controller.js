@@ -70,6 +70,17 @@ const updateStatus = async (req, res, next) => {
   }
 };
 
+// ── PATCH /api/v1/orders/admin/:id/payment
+// Admin confirms an online payment (Telebirr/CBE) was received.
+const confirmPayment = async (req, res, next) => {
+  try {
+    const order = await service.confirmOrderPayment(req.params.id);
+    ok(res, { order });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ── GET /api/v1/orders/admin/:id
 // Admin get specific order (no userId restriction, returns ETB prices)
 const getAdminOrderById = async (req, res, next) => {
@@ -144,6 +155,7 @@ module.exports = {
   getAllOrders,
   getAdminOrderById,
   updateStatus,
+  confirmPayment,
   getOrderById,
   getPendingReceipt,
   receiveOrder,

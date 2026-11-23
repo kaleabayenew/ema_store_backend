@@ -16,6 +16,16 @@ const {
 
 async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null, couponCode = null } = {}) {
   await ensureOrderFlowSchema();
+  // Cash on delivery is disabled — the rider must never hold product money.
+  // All orders must be prepaid (Telebirr/CBE/wallet/coins) so the escrow
+  // payouts always have collected funds behind them.
+  if (/cash|cod/i.test(String(paymentMethod || ''))) {
+    throw new AppError(
+      'Cash on delivery is no longer available. Please pay online before ordering.',
+      400,
+      'COD_DISABLED',
+    );
+  }
   // Idempotent replay: a retried checkout (e.g. after a client timeout)
   // returns the original order instead of charging/creating twice.
   if (idempotencyKey) {
@@ -628,20 +638,30 @@ async function updateOrderStatus(orderId, status) {
     await client.query('BEGIN');
 
     const { rows: current } = await client.query(
-      `SELECT status FROM orders WHERE id = $1 FOR UPDATE`,
+      `SELECT * FROM orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
     if (current.length === 0) {
       throw new AppError('Order not found', 404, 'NOT_FOUND');
     }
+    const order = current[0];
 
-    const prev = String(current[0].status || '').toUpperCase();
+    const prev = String(order.status || '').toUpperCase();
     const allowed = ALLOWED_TRANSITIONS[prev];
     if (allowed && !allowed.includes(next)) {
       throw new AppError(
         `Cannot move order from ${prev} to ${next}.`,
         400,
         'INVALID_STATUS_TRANSITION',
+      );
+    }
+
+    // Cancellation is only allowed before the rider picks up the package.
+    if (next === 'CANCELLED' && order.handed_over_at) {
+      throw new AppError(
+        'This order cannot be cancelled — the rider has already picked it up.',
+        400,
+        'ALREADY_PICKED_UP',
       );
     }
 
@@ -662,6 +682,77 @@ async function updateOrderStatus(orderId, status) {
       await escrow.settleDeliveryPayouts(client, rows[0]);
     }
 
+    // Cancellation: restock items, refund wallet payments, release coupon.
+    if (next === 'CANCELLED' && prev !== 'CANCELLED' && prev !== 'REFUNDED') {
+      const { rows: cancelItems } = await client.query(
+        `SELECT product_id, quantity FROM order_items WHERE order_id = $1`,
+        [orderId],
+      );
+      for (const ci of cancelItems) {
+        await client.query(
+          `UPDATE products
+           SET stock = stock + $1,
+               sold_count = GREATEST(sold_count - $1, 0)
+           WHERE id = $2`,
+          [ci.quantity, ci.product_id],
+        );
+      }
+
+      // Refund wallet payments — reverse the original purchase transaction.
+      const { rows: payTx } = await client.query(
+        `SELECT id, type, amount, metadata FROM wallet_transactions
+         WHERE metadata->>'orderId' = $1::text
+           AND type IN ('COIN_PURCHASE', 'BALANCE_PURCHASE')
+           AND status = 'COMPLETED'
+         ORDER BY created_at DESC LIMIT 1`,
+        [orderId],
+      );
+      const pay = payTx[0];
+      if (pay) {
+        const meta = typeof pay.metadata === 'string' ? JSON.parse(pay.metadata) : (pay.metadata || {});
+        if (pay.type === 'BALANCE_PURCHASE') {
+          const refundEtb = Math.abs(Number(pay.amount) || 0);
+          if (refundEtb > 0) {
+            await client.query(
+              'UPDATE users SET balance = balance + $1 WHERE id = $2',
+              [refundEtb, order.user_id],
+            );
+            await client.query(
+              `INSERT INTO wallet_transactions (user_id, amount, title, description, type, status, metadata)
+               VALUES ($1, $2, 'Order refund', $3, 'REFUND', 'COMPLETED', $4)`,
+              [order.user_id, refundEtb,
+               `Refund for cancelled order ${order.delivery_code || String(orderId).slice(0, 8)}`,
+               JSON.stringify({ orderId, refundOf: pay.id })],
+            );
+          }
+        } else if (pay.type === 'COIN_PURCHASE') {
+          const coins = parseInt(meta.coins, 10) || 0;
+          if (coins > 0) {
+            await client.query(
+              'UPDATE users SET coins = coins + $1 WHERE id = $2',
+              [coins, order.user_id],
+            );
+            await client.query(
+              `INSERT INTO wallet_transactions (user_id, amount, title, description, type, status, metadata)
+               VALUES ($1, $2, 'Order refund', $3, 'REFUND', 'COMPLETED', $4)`,
+              [order.user_id, -(coins / 100),
+               `Coin refund for cancelled order ${order.delivery_code || String(orderId).slice(0, 8)}`,
+               JSON.stringify({ orderId, refundOf: pay.id, coins })],
+            );
+          }
+        }
+      }
+
+      // Release the redeemed coupon so the customer can use it again.
+      if (order.coupon_id && order.user_id) {
+        await client.query(
+          `UPDATE user_coupons SET is_used = false, used_at = NULL
+           WHERE user_id = $1 AND coupon_id = $2 AND is_used = true`,
+          [order.user_id, order.coupon_id],
+        );
+      }
+    }
+
     await client.query('COMMIT');
     return rows[0];
   } catch (err) {
@@ -670,6 +761,28 @@ async function updateOrderStatus(orderId, status) {
   } finally {
     client.release();
   }
+}
+
+// Admin confirms an online payment (Telebirr/CBE transaction reference was
+// verified) so the order can settle on delivery.
+async function confirmOrderPayment(orderId) {
+  const { rows } = await pool.query(
+    `UPDATE orders
+     SET payment_status = 'PAID',
+         paid_at = COALESCE(paid_at, NOW()),
+         updated_at = NOW()
+     WHERE id = $1 AND COALESCE(payment_status, 'PENDING') <> 'PAID'
+     RETURNING id, payment_status`,
+    [orderId],
+  );
+  if (rows.length === 0) {
+    const { rows: existing } = await pool.query(
+      'SELECT id, payment_status FROM orders WHERE id = $1', [orderId],
+    );
+    if (!existing[0]) throw new AppError('Order not found', 404, 'NOT_FOUND');
+    return existing[0]; // already paid — idempotent
+  }
+  return rows[0];
 }
 
 // ── Get Order by ID ───────────────────────────────────────────────────────
@@ -866,7 +979,8 @@ async function receiveOrder(userId, orderId) {
     await client.query('BEGIN');
     const { rows } = await client.query(
       `SELECT o.id, o.status, o.user_id, o.delivery_agent_id, o.delivery_requested_at, o.delivery_code,
-              o.total_cents, o.total_amount, o.delivery_fee_cents, o.rider_commission_cents
+              o.total_cents, o.total_amount, o.delivery_fee_cents, o.rider_commission_cents,
+              o.payment_status, o.payment_method
        FROM orders o
        WHERE o.id = $1 AND o.user_id = $2
        FOR UPDATE`,
@@ -880,13 +994,23 @@ async function receiveOrder(userId, orderId) {
       throw new AppError('Delivery has not been requested for this order yet.', 400, 'DELIVERY_NOT_REQUESTED');
     }
 
+    // Never settle payouts for unpaid orders — wallet payments are already
+    // PAID; Telebirr/CBE must be confirmed by an admin first.
+    if (String(order.payment_status || '').toUpperCase() !== 'PAID') {
+      throw new AppError(
+        'Payment for this order has not been confirmed yet.',
+        400,
+        'PAYMENT_NOT_CONFIRMED',
+      );
+    }
+
     const { rows: updateRows } = await client.query(
       `UPDATE orders
        SET status = 'DELIVERED',
            delivered_at = NOW(),
            customer_accepted_at = NOW(),
            payment_status = 'PAID',
-           paid_at = NOW(),
+           paid_at = COALESCE(paid_at, NOW()),
            updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
@@ -1141,6 +1265,7 @@ module.exports = {
   getUserOrders,
   getAllOrders,
   updateOrderStatus,
+  confirmOrderPayment,
   getOrderById,
   getPendingReceipt,
   receiveOrder,

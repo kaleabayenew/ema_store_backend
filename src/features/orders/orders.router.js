@@ -14,6 +14,7 @@ router.use(requireAuth);
 router.get('/admin', adminOnly, ctrl.getAllOrders);
 router.get('/admin/:id', adminOnly, ctrl.getAdminOrderById);
 router.patch('/admin/:id/status', adminOnly, ctrl.updateStatus);
+router.patch('/admin/:id/payment', adminOnly, ctrl.confirmPayment);
 
 // Legacy alias used by older code
 router.get('/all', adminOnly, ctrl.getAllOrders);
