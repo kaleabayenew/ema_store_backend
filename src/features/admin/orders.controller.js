@@ -1,6 +1,7 @@
 const { ok } = require('../../core/utils/response');
 const { AppError } = require('../../core/errors/app_error');
 const { pool } = require('../../core/config/database');
+const orderService = require('../orders/orders.service');
 
 // ── GET /api/v1/admin/orders
 // Query: ?search=&status=&page=&limit=
@@ -165,11 +166,9 @@ async function updateOrderStatus(req, res, next) {
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status value' });
     }
-    const { rowCount } = await pool.query(
-      `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [status, req.params.id],
-    );
-    if (rowCount === 0) return next(new AppError('Order not found', 404, 'NOT_FOUND'));
+    // Delegate to the order service so transition rules, escrow payouts and
+    // cancellation refunds all apply — a raw UPDATE here would bypass them.
+    await orderService.updateOrderStatus(req.params.id, status);
     ok(res, { message: `Order status updated to ${status}` });
   } catch (err) {
     next(err);

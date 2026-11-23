@@ -388,8 +388,65 @@ async function computeCommissions({ productCents = 0, deliveryFeeCents = 0, legs
   return { serviceFeeCents, partnerCommissionCents, riderCommissionCents };
 }
 
+/**
+ * Self-healing backfill for orders created before the fee engine (or via a
+ * path that skipped it): delivery_fee_cents = 0. For orders still in flight
+ * (not DELIVERED/CANCELLED — those payouts are already settled) the fee is
+ * recomputed from the stored shipping address + order items and persisted,
+ * so rider apps always read the real DB value. Returns
+ * { feeCents, riderCommissionCents }.
+ */
+async function ensureOrderFeeCents(orderId) {
+  const { rows } = await pool.query(
+    `SELECT id, shipping_address, delivery_fee_cents, rider_commission_cents, status
+     FROM orders WHERE id = $1`,
+    [orderId],
+  );
+  const order = rows[0];
+  if (!order) return { feeCents: 0, riderCommissionCents: 0 };
+
+  const existing = Number(order.delivery_fee_cents) || 0;
+  if (existing > 0) {
+    return {
+      feeCents: existing,
+      riderCommissionCents: Number(order.rider_commission_cents) || 0,
+    };
+  }
+  if (['DELIVERED', 'CANCELLED'].includes(String(order.status))) {
+    return { feeCents: 0, riderCommissionCents: 0 };
+  }
+
+  const { rows: itemRows } = await pool.query(
+    `SELECT p.name_en AS name, oi.quantity, p.partner_id
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     WHERE oi.order_id = $1`,
+    [orderId],
+  );
+  const { feeCents } = await computeOrderFee({
+    items: itemRows.map((r) => ({
+      name: r.name || 'Product',
+      quantity: r.quantity,
+      partnerId: r.partner_id,
+    })),
+    shippingAddress: order.shipping_address || '',
+  });
+  const settings = await getSettings();
+  const riderCommissionCents = Math.round(
+    (feeCents * settings.riderCommissionPct) / 100,
+  );
+  await pool.query(
+    `UPDATE orders
+     SET delivery_fee_cents = $2, rider_commission_cents = $3
+     WHERE id = $1 AND COALESCE(delivery_fee_cents, 0) = 0`,
+    [orderId, feeCents, riderCommissionCents],
+  );
+  return { feeCents, riderCommissionCents };
+}
+
 module.exports = {
   ensureFeeSchema,
+  ensureOrderFeeCents,
   getSettings,
   updateSettings,
   computeLegFee,

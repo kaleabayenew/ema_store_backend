@@ -17,6 +17,29 @@ function normalizeAgentCode(raw) {
   return code.toUpperCase().slice(0, 40);
 }
 
+/**
+ * Orders created before the fee engine have delivery_fee_cents = 0. For
+ * in-flight orders, recompute + persist the real fee so the rider sees the
+ * same amount the customer was charged. Delivered/cancelled orders are
+ * skipped inside ensureOrderFeeCents (payouts already settled).
+ */
+async function applyFeeBackfill(job) {
+  if (!job || !job.id || Number(job.deliveryFeeCents) > 0) return;
+  try {
+    const feeSvc = require('./delivery_fee.service');
+    const res = await feeSvc.ensureOrderFeeCents(job.id);
+    if (res.feeCents > 0) {
+      job.deliveryFeeCents = res.feeCents;
+      job.riderEarningCents = Math.max(
+        0,
+        res.feeCents - res.riderCommissionCents,
+      );
+    }
+  } catch (_) {
+    // Best-effort — never break the delivery flow over a fee lookup.
+  }
+}
+
 async function findAgent(code) {
   const normalized = normalizeAgentCode(code);
   if (!normalized) {
@@ -152,7 +175,7 @@ async function listOffers(rawCode) {
     }
   }
 
-  return {
+  const result = {
     agent: agent
       ? {
           code: agent.agent_code,
@@ -216,6 +239,11 @@ async function listOffers(rawCode) {
       createdAt: r.created_at,
     })),
   };
+
+  for (const offer of result.offers) {
+    await applyFeeBackfill(offer);
+  }
+  return result;
 }
 
 /**
@@ -375,6 +403,7 @@ async function getActiveDelivery(rawCode) {
             o.handover_requested_at, o.handover_proof, o.handed_over_at,
             o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
             o.customer_accepted_at, o.customer_rejected_at, o.payment_status,
+            o.delivery_fee_cents, o.rider_commission_cents,
             u.full_name AS customer_name, u.phone AS customer_phone,
             COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
             COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address, shop.phone AS shop_phone
@@ -399,15 +428,20 @@ async function getActiveDelivery(rawCode) {
   const r = rows[0];
 
   const { rows: itemRows } = await pool.query(
-    `SELECT oi.order_id, p.name_en AS name, oi.quantity, oi.price_at_order
+    `SELECT oi.order_id, p.name_en AS name, oi.quantity, oi.price_at_order,
+            p.partner_id,
+            COALESCE(pp.shop_name, pp.business_name) AS shop_name,
+            COALESCE(pp.address, pp.city) AS shop_address,
+            pp.shop_lat, pp.shop_lng
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
+     LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
      WHERE oi.order_id = $1
      ORDER BY oi.created_at`,
     [r.id],
   );
 
-  return {
+  const job = {
     id: r.id,
     orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
     totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
@@ -436,8 +470,45 @@ async function getActiveDelivery(rawCode) {
       name: i.name || 'Product',
       quantity: Number(i.quantity) || 1,
       price: Number(i.price_at_order) || 0,
+      partnerId: i.partner_id || null,
+      shopName: i.shop_name || null,
+      shopAddress: i.shop_address || null,
+      shopLat: i.shop_lat ?? null,
+      shopLng: i.shop_lng ?? null,
     })),
+    deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+    riderEarningCents: (() => {
+      const fee = Number(r.delivery_fee_cents) || 0;
+      if (fee <= 0) return null;
+      return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+    })(),
+    legs: (() => {
+      const byPartner = new Map();
+      for (const it of itemRows) {
+        const key = it.partner_id || it.shop_name || 'unknown';
+        if (!byPartner.has(key)) {
+          byPartner.set(key, {
+            shopName: it.shop_name || 'Ema Store Partner',
+            shopAddress: it.shop_address || 'Addis Ababa, Ethiopia',
+            shopLat: it.shop_lat ?? null,
+            shopLng: it.shop_lng ?? null,
+            items: [],
+          });
+        }
+        byPartner.get(key).items.push(`${it.name || 'Product'} x${Number(it.quantity) || 1}`);
+      }
+      return [...byPartner.values()].map((l) => ({
+        shopName: l.shopName,
+        shopAddress: l.shopAddress,
+        shopLat: l.shopLat,
+        shopLng: l.shopLng,
+        items: l.items,
+      }));
+    })(),
   };
+
+  await applyFeeBackfill(job);
+  return job;
 }
 
 /**
@@ -622,6 +693,7 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
   const { rows } = await pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at, o.updated_at,
+            o.delivery_fee_cents, o.rider_commission_cents,
             o.delivery_accepted_at, o.handed_over_at, o.delivered_at,
             o.delivery_requested_at, o.customer_accepted_at,
             u.full_name AS customer_name, u.phone AS customer_phone,
@@ -697,6 +769,35 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
       shopAddress: r.shop_address || '',
       shopPhone: r.shop_phone || null,
       items: itemsByOrder[r.id] || [],
+      deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+      riderEarningCents: (() => {
+        const fee = Number(r.delivery_fee_cents) || 0;
+        if (fee <= 0) return null;
+        return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+      })(),
+      legs: (() => {
+        const byPartner = new Map();
+        for (const it of itemsByOrder[r.id] || []) {
+          const key = it.partnerId || it.shopName || 'unknown';
+          if (!byPartner.has(key)) {
+            byPartner.set(key, {
+              shopName: it.shopName || 'Ema Store Partner',
+              shopAddress: it.shopAddress || 'Addis Ababa, Ethiopia',
+              shopLat: it.shopLat ?? null,
+              shopLng: it.shopLng ?? null,
+              items: [],
+            });
+          }
+          byPartner.get(key).items.push(`${it.name} x${it.quantity}`);
+        }
+        return [...byPartner.values()].map((l) => ({
+          shopName: l.shopName,
+          shopAddress: l.shopAddress,
+          shopLat: l.shopLat,
+          shopLng: l.shopLng,
+          items: l.items,
+        }));
+      })(),
     })),
   };
 }

@@ -15,7 +15,8 @@ const getBalance = async (req, res, next) => {
       throw new AppError('You do not have access to the balance page.', 403, 'FORBIDDEN');
     }
 
-    const [summaryRes, entriesRes, pendingRes] = await Promise.all([
+    const IN_FLIGHT = `('CONFIRMED','PROCESSING','PACKED','SHIPPED')`;
+    const [summaryRes, entriesRes, pendingRes, inflightRes, paidRes] = await Promise.all([
       pool.query(`
         SELECT
           COALESCE(SUM(o.service_fee_cents), 0)::bigint AS service_charges,
@@ -54,9 +55,46 @@ const getBalance = async (req, res, next) => {
         FROM wallet_transactions
         WHERE type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST') AND status = 'PENDING'
       `),
+      // In-flight orders: money earned/held but not yet settled.
+      pool.query(`
+        SELECT
+          COALESCE((
+            SELECT SUM(oi.price_at_order * oi.quantity - COALESCE(oi.commission_cents, 0))
+            FROM order_items oi
+            JOIN orders od ON od.id = oi.order_id
+            WHERE od.status IN ${IN_FLIGHT}
+          ), 0)::bigint AS partner_gross,
+          COALESCE(SUM(CASE WHEN COALESCE(o.delivery_fee_cents, 0) > 0
+            THEN GREATEST(o.delivery_fee_cents - COALESCE(o.rider_commission_cents, 0), 0)
+            ELSE ROUND(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) * 0.10) END), 0)::bigint AS rider_gross,
+          COALESCE(SUM(COALESCE(o.service_fee_cents, 0)
+                    + COALESCE(o.partner_commission_cents, 0)
+                    + COALESCE(o.rider_commission_cents, 0)), 0)::bigint AS platform_pending,
+          COALESCE(SUM(o.total_cents) FILTER (WHERE o.payment_status = 'PAID'), 0)::bigint AS escrow_held
+        FROM orders o
+        WHERE o.status IN ${IN_FLIGHT}
+      `),
+      // Already-disbursed milestone payouts on in-flight orders (e.g. the
+      // 50% partner deposit at pickup) so pending = earned − paid.
+      pool.query(`
+        SELECT op.payee_type, COALESCE(SUM(op.paid_cents), 0)::bigint AS paid
+        FROM order_payouts op
+        JOIN orders o ON o.id = op.order_id
+        WHERE o.status IN ${IN_FLIGHT}
+        GROUP BY op.payee_type
+      `),
     ]);
 
     const s = summaryRes.rows[0] || {};
+    const inf = inflightRes.rows[0] || {};
+    const paidByType = {};
+    for (const r of paidRes.rows) paidByType[r.payee_type] = Number(r.paid || 0);
+    const pendingPartnerCents = Math.max(
+      0, Number(inf.partner_gross || 0) - (paidByType.PARTNER || 0),
+    );
+    const pendingRiderCents = Math.max(
+      0, Number(inf.rider_gross || 0) - (paidByType.RIDER || 0),
+    );
     const serviceCharges = Number(s.service_charges || 0);
     const partnerCommissions = Number(s.partner_commissions || 0);
     const riderCommissions = Number(s.rider_commissions || 0);
@@ -99,6 +137,10 @@ const getBalance = async (req, res, next) => {
         partnerCommissions,
         riderCommissions,
         totalPaidOutCents: Number(s.total_paid_out || 0),
+        pendingPartnerCents,
+        pendingRiderCents,
+        platformPendingCents: Number(inf.platform_pending || 0),
+        escrowHeldCents: Number(inf.escrow_held || 0),
       },
       entries: entries.slice(0, 100),
     });
