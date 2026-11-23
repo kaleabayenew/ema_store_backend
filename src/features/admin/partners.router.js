@@ -6,6 +6,8 @@ const dashboardCtrl = require('./dashboard.controller');
 const approvalsCtrl = require('./approvals.controller');
 const communityCtrl = require('./community.controller');
 const agentsCtrl = require('./agents.controller');
+const feeCtrl = require('../delivery/delivery_fee.controller');
+const balanceCtrl = require('./balance.controller');
 
 const router = Router();
 
@@ -33,6 +35,13 @@ router.post('/agents', adminOnly, agentsCtrl.createAgent);
 router.get('/agents/:id', agentsCtrl.getAgent);
 router.patch('/agents/:id/status', adminOnly, agentsCtrl.setAgentStatus);
 router.post('/agents/:id/reset-password', adminOnly, agentsCtrl.resetAgentPassword);
+
+// Delivery fee pricing (distance + weight + material)
+router.get('/delivery-fee', feeCtrl.adminGetSettings);
+router.put('/delivery-fee', adminOnly, feeCtrl.adminUpdateSettings);
+
+// Platform balance ledger (service fees + commissions)
+router.get('/balance', balanceCtrl.getBalance);
 
 // Partners
 router.get('/partners', partnerCtrl.getAllPartners);

@@ -105,6 +105,8 @@ async function listOffers(rawCode) {
   const { rows } = await pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at,
+            o.delivery_fee_cents,
+            o.rider_commission_cents,
             COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
             COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address
      FROM orders o
@@ -162,6 +164,13 @@ async function listOffers(rawCode) {
       dropoffLng: parseAddressPin(r.shipping_address).lng,
       deliveryCode: r.delivery_code || null,
       status: r.status,
+      deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+      // Net amount the rider actually earns (fee minus platform commission).
+      riderEarningCents: (() => {
+        const fee = Number(r.delivery_fee_cents) || 0;
+        if (fee <= 0) return null;
+        return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+      })(),
       // Step 3 Privacy: customer name/phone and shop phone hidden until accept
       customerName: null,
       customerPhone: null,
@@ -716,6 +725,8 @@ async function getEarnings(rawCode) {
 
   const { rows } = await pool.query(
     `SELECT o.id, o.delivery_code, o.status, o.created_at, o.delivered_at,
+            o.delivery_fee_cents,
+            o.rider_commission_cents,
             COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) AS total_cents,
             u.full_name AS customer_name,
             COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name
@@ -735,7 +746,16 @@ async function getEarnings(rawCode) {
     [agent.id],
   );
 
-  const earningOf = (r) => Math.round(((Number(r.total_cents) || 0) * 0.10));
+  // Rider earns the delivery fee minus the platform's rider commission;
+  // orders placed before commission pricing keep the full fee, and orders
+  // with no fee at all fall back to the legacy 10%-of-total rule.
+  const earningOf = (r) => {
+    const fee = Number(r.delivery_fee_cents) || 0;
+    if (fee > 0) {
+      return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+    }
+    return Math.round((Number(r.total_cents) || 0) * 0.10);
+  };
 
   const now = new Date();
   const startOfToday = new Date(now);
@@ -776,11 +796,17 @@ async function getEarnings(rawCode) {
   // Totals must cover ALL delivered orders, not just the recent 15.
   const { rows: totals } = await pool.query(
     `SELECT
-       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)) FILTER (
+       COALESCE(SUM(CASE WHEN COALESCE(o.delivery_fee_cents, 0) > 0
+         THEN GREATEST(o.delivery_fee_cents - COALESCE(o.rider_commission_cents, 0), 0)
+         ELSE ROUND(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) * 0.10) END) FILTER (
          WHERE o.delivered_at >= date_trunc('day', NOW())), 0)::bigint AS today_cents,
-       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)) FILTER (
+       COALESCE(SUM(CASE WHEN COALESCE(o.delivery_fee_cents, 0) > 0
+         THEN GREATEST(o.delivery_fee_cents - COALESCE(o.rider_commission_cents, 0), 0)
+         ELSE ROUND(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) * 0.10) END) FILTER (
          WHERE o.delivered_at >= NOW() - INTERVAL '7 days'), 0)::bigint AS week_cents,
-       COALESCE(SUM(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int)), 0)::bigint AS total_cents,
+       COALESCE(SUM(CASE WHEN COALESCE(o.delivery_fee_cents, 0) > 0
+         THEN GREATEST(o.delivery_fee_cents - COALESCE(o.rider_commission_cents, 0), 0)
+         ELSE ROUND(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) * 0.10) END), 0)::bigint AS total_cents,
        COUNT(*) FILTER (WHERE o.delivered_at >= date_trunc('day', NOW()))::int AS deliveries_today,
        COUNT(*) FILTER (WHERE o.delivered_at >= NOW() - INTERVAL '7 days')::int AS deliveries_week,
        COUNT(*)::int AS total_deliveries
@@ -792,9 +818,9 @@ async function getEarnings(rawCode) {
 
   return {
     agent: { code: agent.agent_code, name: agent.full_name },
-    todayCents: Math.round(Number(t.today_cents || 0) * 0.10),
-    weekCents: Math.round(Number(t.week_cents || 0) * 0.10),
-    totalCents: Math.round(Number(t.total_cents || 0) * 0.10),
+    todayCents: Math.round(Number(t.today_cents || 0)),
+    weekCents: Math.round(Number(t.week_cents || 0)),
+    totalCents: Math.round(Number(t.total_cents || 0)),
     deliveriesToday: t.deliveries_today || 0,
     deliveriesWeek: t.deliveries_week || 0,
     totalDeliveries: t.total_deliveries || 0,

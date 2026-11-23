@@ -1,7 +1,12 @@
 const { Router } = require('express');
 const ctrl = require('./delivery.controller');
+const feeCtrl = require('./delivery_fee.controller');
 
 const router = Router();
+
+// Delivery fee rates + checkout preview (public — customer app checkout)
+router.get('/fee-settings', feeCtrl.getFeeSettings);
+router.post('/fee-preview', feeCtrl.previewFee);
 
 // Delivery agents authenticate with their agent code (x-agent-code header) —
 // the same code printed in their ID card QR.
