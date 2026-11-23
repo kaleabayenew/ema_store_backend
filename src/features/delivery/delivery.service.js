@@ -395,7 +395,15 @@ async function declineOffer(rawCode, orderId) {
 async function getActiveDelivery(rawCode) {
   await ensureOrderFlowSchema();
   await releaseStalePickups();
-  const agent = await findAgent(rawCode);
+  // Unknown/inactive agent codes must not 401 here — the rider app polls
+  // this endpoint before listing offers, and a failure would hide the whole
+  // Available tab. No recognised agent simply means no active delivery.
+  let agent;
+  try {
+    agent = await findAgent(rawCode);
+  } catch (_) {
+    return null;
+  }
 
   const { rows } = await pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
