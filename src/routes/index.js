@@ -26,6 +26,9 @@ const recentlyViewedRouter = require('../features/recently-viewed/recently_viewe
 const marketingRouter = require('../features/marketing/marketing.router');
 const aboutRouter = require('../features/about/about.router');
 const appUpdateRouter = require('../features/app-update/app-update.router');
+const deliveryRouter = require('../features/delivery/delivery.router');
+const agentAuthRouter = require('../features/agent_auth/agent_auth.router');
+const proofRouter = require('../features/proof/proof.router');
 
 // ── Partner feature routers ───────────────────────────────────────────────────
 const partnerAuthRouter = require('../features/partner/auth/auth.router');
@@ -73,6 +76,9 @@ router.use('/recently-viewed', recentlyViewedRouter);
 router.use('/marketing', marketingRouter);
 router.use('/about', aboutRouter);
 router.use('/app-update', appUpdateRouter);
+router.use('/delivery', deliveryRouter);
+router.use('/agent-auth', agentAuthRouter);
+router.use('/proof', proofRouter);
 
 // ── Partner routes ────────────────────────────────────────────────────────────
 router.use('/partner/auth', partnerAuthRouter);
