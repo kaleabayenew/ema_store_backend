@@ -22,7 +22,7 @@ async function getStats(partnerId) {
     // Total revenue (sum of completed/active order items, cents)
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(order_items.price_at_order, 0) * order_items.quantity
+         COALESCE(order_items.price_at_order, 0) * order_items.quantity - COALESCE(order_items.commission_cents, 0)
        ), 0)::bigint AS total
        FROM order_items
        JOIN products ON products.id = order_items.product_id
@@ -43,7 +43,7 @@ async function getStats(partnerId) {
       `SELECT
          DATE(orders.created_at) AS date,
          COALESCE(SUM(
-           COALESCE(order_items.price_at_order, 0) * order_items.quantity
+           COALESCE(order_items.price_at_order, 0) * order_items.quantity - COALESCE(order_items.commission_cents, 0)
          ), 0)::bigint AS amount
        FROM order_items
        JOIN products ON products.id = order_items.product_id
@@ -58,7 +58,7 @@ async function getStats(partnerId) {
     // Today's sales (cents)
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(order_items.price_at_order, 0) * order_items.quantity
+         COALESCE(order_items.price_at_order, 0) * order_items.quantity - COALESCE(order_items.commission_cents, 0)
        ), 0)::bigint AS total
        FROM order_items
        JOIN products ON products.id = order_items.product_id
@@ -71,7 +71,7 @@ async function getStats(partnerId) {
     // Yesterday's sales (cents) — for the change indicator
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(order_items.price_at_order, 0) * order_items.quantity
+         COALESCE(order_items.price_at_order, 0) * order_items.quantity - COALESCE(order_items.commission_cents, 0)
        ), 0)::bigint AS total
        FROM order_items
        JOIN products ON products.id = order_items.product_id

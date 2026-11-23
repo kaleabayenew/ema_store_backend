@@ -57,7 +57,7 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
 
         // Query product details
         const { rows: productRows } = await client.query(`
-          SELECT id, stock, price_cents, discount_cents, coin_price
+          SELECT id, stock, price_cents, discount_cents, coin_price, name_en, partner_id
           FROM products
           WHERE id = $1
         `, [productId]);
@@ -80,13 +80,15 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
           price_cents: product.price_cents,
           discount_cents: product.discount_cents,
           coin_price: product.coin_price,
+          name_en: product.name_en,
+          partner_id: product.partner_id,
           promotion_id: item.promotionId || item.promotion_id || null,
         });
       }
     } else {
       // Get cart items
       const { rows: cartItems } = await client.query(`
-        SELECT ci.*, p.stock, p.price_cents, p.discount_cents, p.coin_price
+        SELECT ci.*, p.stock, p.price_cents, p.discount_cents, p.coin_price, p.name_en, p.partner_id
         FROM cart_items ci
         JOIN products p ON ci.product_id = p.id
         WHERE ci.user_id = $1
@@ -155,6 +157,35 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       totalCents -= couponDiscountCents;
     }
 
+    // ── Delivery fee ──────────────────────────────────────────────────
+    // Distance (shop→customer) + weight + material pricing. The customer
+    // always pays it on top of the (coupon-discounted) product total; the
+    // rider earns the full fee on delivery. Coupons never discount the fee.
+    const feeSvc = require('../delivery/delivery_fee.service');
+    await feeSvc.ensureFeeSchema();
+    const feeItems = itemsToOrder.map((i) => ({
+      name: i.name_en || i.name || 'Product',
+      quantity: i.quantity,
+      partnerId: i.partner_id,
+    }));
+    const { feeCents: deliveryFeeCents } = await feeSvc.computeOrderFee({
+      items: feeItems,
+      shippingAddress,
+    });
+
+    // ── Platform commissions ─────────────────────────────────────────
+    // productCents = coupon-discounted product subtotal (pre-fee total).
+    // Customer pays a flat service fee on top; the platform keeps the
+    // service fee + partner commission + rider commission.
+    const productCents = totalCents;
+    const feeSettings = await feeSvc.getSettings();
+    const serviceFeeCents = feeSettings.serviceFeeCents;
+    const partnerCommissionPct = feeSettings.partnerCommissionPct;
+    const riderCommissionCents = Math.round(
+      (deliveryFeeCents * feeSettings.riderCommissionPct) / 100,
+    );
+    totalCents += deliveryFeeCents + serviceFeeCents;
+
     // ── Wallet payments: COINS or BALANCE ──────────────────────────────
     // 'COINS'   → every item must have a coin_price; total is in coins.
     // 'BALANCE' → total is the ETB order total charged from users.balance.
@@ -205,24 +236,33 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     const paymentStatus = walletPayment ? 'PAID' : 'PENDING';
     const deliveryCode = generateDeliveryCode();
 
+    const orderPartnerCommissionCents = Math.round(
+      (productCents * partnerCommissionPct) / 100,
+    );
     const { rows: orderRows } = await client.query(`
-      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents, delivery_code, payment_status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents, delivery_code, payment_status, delivery_fee_cents, service_fee_cents, partner_commission_cents, rider_commission_cents)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents, deliveryCode, paymentStatus]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents, deliveryCode, paymentStatus, deliveryFeeCents, serviceFeeCents, orderPartnerCommissionCents, riderCommissionCents]);
 
     const order = orderRows[0];
 
-    // Create order items and update stock
+    // Create order items and update stock. Each item carries its own
+    // partner commission so multi-partner orders deduct correctly.
+    let partnerCommissionCents = 0;
     for (const item of itemsToOrder) {
       const hasDiscount = item.discount_cents > 0 && item.discount_cents < item.price_cents;
       const normalPrice = hasDiscount ? (item.price_cents - item.discount_cents) : item.price_cents;
       const priceCents = item.promo_price_cents ?? normalPrice;
+      const itemCommissionCents = Math.round(
+        (priceCents * item.quantity * partnerCommissionPct) / 100,
+      );
+      partnerCommissionCents += itemCommissionCents;
 
       await client.query(`
-        INSERT INTO order_items (order_id, product_id, quantity, price_at_order, promotion_id)
-        VALUES ($1, $2, $3, $4, $5)
-      `, [order.id, item.product_id, item.quantity, priceCents, item.promotion_id || null]);
+        INSERT INTO order_items (order_id, product_id, quantity, price_at_order, promotion_id, commission_cents)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [order.id, item.product_id, item.quantity, priceCents, item.promotion_id || null, itemCommissionCents]);
 
       // Atomic stock decrement — the WHERE guard prevents overselling when
       // two orders race for the last unit (the earlier SELECT is not locked).
@@ -234,6 +274,14 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       if (stockUpdated === 0) {
         throw new AppError('Insufficient stock for one or more items', 400, 'INSUFFICIENT_STOCK');
       }
+    }
+
+    // Sync the order-level partner commission with the exact per-item sum.
+    if (partnerCommissionCents !== orderPartnerCommissionCents) {
+      await client.query(
+        'UPDATE orders SET partner_commission_cents = $1 WHERE id = $2',
+        [partnerCommissionCents, order.id],
+      );
     }
 
     // Clear cart only if we used cart items

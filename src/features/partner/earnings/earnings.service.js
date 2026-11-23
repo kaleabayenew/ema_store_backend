@@ -7,7 +7,7 @@ async function getEarnings(partnerId) {
     // Total revenue from completed/delivered order items
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(oi.price_at_order, 0) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)
        ), 0)::bigint AS total_revenue
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -18,7 +18,7 @@ async function getEarnings(partnerId) {
     // This month
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(oi.price_at_order, 0) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)
        ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -31,7 +31,7 @@ async function getEarnings(partnerId) {
     // Last month
     pool.query(
       `SELECT COALESCE(SUM(
-         COALESCE(oi.price_at_order, 0) * oi.quantity
+         COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)
        ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -53,7 +53,7 @@ async function getEarnings(partnerId) {
       `SELECT
          DATE_TRUNC('week', o.created_at)::date AS week_start,
          COALESCE(SUM(
-           COALESCE(oi.price_at_order, 0) * oi.quantity
+           COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)
          ), 0)::bigint AS amount
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
@@ -105,7 +105,7 @@ async function getTransactions(partnerId, { page = 1, limit = 20 } = {}) {
 async function availableBalanceCents(partnerId) {
   const [rev, pend] = await Promise.all([
     pool.query(
-      `SELECT COALESCE(SUM(COALESCE(oi.price_at_order, 0) * oi.quantity), 0)::bigint AS total
+      `SELECT COALESCE(SUM(COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)), 0)::bigint AS total
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
        JOIN orders o ON o.id = oi.order_id
