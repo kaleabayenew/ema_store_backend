@@ -1,4 +1,5 @@
-const TelegramBot = require('node-telegram-bot-api');
+// telegram-bot-api is required lazily inside the try/catch below so a broken
+// install can never crash server boot.
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Telegram Bot Service
@@ -13,10 +14,17 @@ const TelegramBot = require('node-telegram-bot-api');
 // Configuration from environment variables
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// Create bot instance (only if token is available)
+// Create bot instance (only if token is available). A misconfigured token or
+// library problem must never take the whole API down — log and continue.
 let bot = null;
 if (TELEGRAM_BOT_TOKEN) {
-  bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+  try {
+    const TelegramBot = require('node-telegram-bot-api');
+    bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+  } catch (err) {
+    console.error('[Telegram Bot] Failed to initialize:', err.message || err);
+    bot = null;
+  }
 }
 
 const SEND_TIMEOUT_MS = 8_000;
