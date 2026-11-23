@@ -3,7 +3,7 @@ const { AppError } = require('../../../core/errors/app_error');
 
 async function getEarnings(partnerId) {
   // Execute all earnings queries in parallel
-  const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes] = await Promise.all([
+  const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes, commissionRes, settledRes] = await Promise.all([
     // Total revenue from completed/delivered order items
     pool.query(
       `SELECT COALESCE(SUM(
@@ -65,14 +65,39 @@ async function getEarnings(partnerId) {
        ORDER BY week_start ASC`,
       [partnerId],
     ),
+    // Platform commission paid by this partner on delivered orders.
+    pool.query(
+      `SELECT COALESCE(SUM(oi.commission_cents), 0)::bigint AS commission
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE p.partner_id = $1 AND o.status IN ('DELIVERED', 'COMPLETED')`,
+      [partnerId],
+    ),
+    // Escrow payouts already deposited into this partner's wallet.
+    pool.query(
+      `SELECT COALESCE(SUM(amount) * 100, 0)::bigint AS settled
+       FROM wallet_transactions
+       WHERE user_id = $1 AND type = 'ORDER_PAYOUT' AND status = 'COMPLETED'`,
+      [partnerId],
+    ),
   ]);
 
   const totalRev = Number(totalRes.rows[0]?.total_revenue ?? 0);
   const pending = Number(pendingRes.rows[0]?.pending ?? 0);
+  const commissionCents = Number(commissionRes.rows[0]?.commission ?? 0);
+  let commissionPct = null;
+  try {
+    const feeSvc = require('../../delivery/delivery_fee.service');
+    commissionPct = (await feeSvc.getSettings()).partnerCommissionPct;
+  } catch (_) { /* settings table may not exist yet */ }
   const available = Math.max(0, totalRev - pending);
 
   return {
     totalRevenueCents: totalRev,
+    totalCommissionCents: commissionCents,
+    commissionPct,
+    settledPayoutCents: Number(settledRes.rows[0]?.settled ?? 0),
     thisMonthCents: Number(thisMonthRes.rows[0]?.amount ?? 0),
     lastMonthCents: Number(lastMonthRes.rows[0]?.amount ?? 0),
     pendingPayoutCents: pending,

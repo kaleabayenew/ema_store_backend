@@ -168,18 +168,20 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       quantity: i.quantity,
       partnerId: i.partner_id,
     }));
-    const { feeCents: deliveryFeeCents } = await feeSvc.computeOrderFee({
+    const { feeCents: deliveryFeeCents, legs: feeLegs } = await feeSvc.computeOrderFee({
       items: feeItems,
       shippingAddress,
     });
 
     // ── Platform commissions ─────────────────────────────────────────
     // productCents = coupon-discounted product subtotal (pre-fee total).
-    // Customer pays a flat service fee on top; the platform keeps the
-    // service fee + partner commission + rider commission.
+    // Customer pays a service fee per shop leg (first leg full price,
+    // extra partner locations discounted); the platform keeps the service
+    // fee + partner commission + rider commission.
     const productCents = totalCents;
     const feeSettings = await feeSvc.getSettings();
-    const serviceFeeCents = feeSettings.serviceFeeCents;
+    const legsCount = feeLegs.length || 1;
+    const serviceFeeCents = feeSvc.serviceFeeForLegs(feeSettings, legsCount);
     const partnerCommissionPct = feeSettings.partnerCommissionPct;
     const riderCommissionCents = Math.round(
       (deliveryFeeCents * feeSettings.riderCommissionPct) / 100,
@@ -652,6 +654,14 @@ async function updateOrderStatus(orderId, status) {
       RETURNING *
     `, [next, orderId]);
 
+    // Escrow: if this transition delivers the order (admin path), settle
+    // the remaining partner share + rider earning. Idempotent via
+    // order_payouts.paid_cents.
+    if (next === 'DELIVERED' && prev !== 'DELIVERED' && rows[0]) {
+      const escrow = require('../delivery/escrow.service');
+      await escrow.settleDeliveryPayouts(client, rows[0]);
+    }
+
     await client.query('COMMIT');
     return rows[0];
   } catch (err) {
@@ -855,7 +865,8 @@ async function receiveOrder(userId, orderId) {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT o.id, o.status, o.user_id, o.delivery_agent_id, o.delivery_requested_at, o.delivery_code
+      `SELECT o.id, o.status, o.user_id, o.delivery_agent_id, o.delivery_requested_at, o.delivery_code,
+              o.total_cents, o.total_amount, o.delivery_fee_cents, o.rider_commission_cents
        FROM orders o
        WHERE o.id = $1 AND o.user_id = $2
        FOR UPDATE`,
@@ -882,6 +893,11 @@ async function receiveOrder(userId, orderId) {
       [orderId],
     );
     updatedOrder = updateRows[0];
+
+    // Escrow: deposit remaining partner share + full rider earning.
+    const escrow = require('../delivery/escrow.service');
+    await escrow.settleDeliveryPayouts(client, order);
+
     await client.query('COMMIT');
 
     // Notify Partner

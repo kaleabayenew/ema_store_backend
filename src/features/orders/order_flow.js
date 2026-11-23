@@ -79,6 +79,24 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
            expires_at TIMESTAMPTZ NOT NULL
          )`,
       );
+      // Escrow payout ledger: tracks each payee's share per order and how
+      // much has been disbursed at each milestone (50% pickup / 100% delivery).
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS order_payouts (
+           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+           order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+           payee_type VARCHAR(10) NOT NULL,
+           payee_id UUID NOT NULL,
+           share_cents INTEGER NOT NULL DEFAULT 0,
+           paid_cents INTEGER NOT NULL DEFAULT 0,
+           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+           UNIQUE (order_id, payee_type, payee_id)
+         )`,
+      );
+      await db.query(
+        `CREATE INDEX IF NOT EXISTS idx_order_payouts_order ON order_payouts(order_id)`,
+      );
     })().catch((err) => {
       schemaPromise = null; // retry on next call
       throw err;
