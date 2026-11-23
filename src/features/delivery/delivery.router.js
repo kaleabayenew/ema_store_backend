@@ -18,7 +18,8 @@ router.post('/offers/:orderId/accept', ctrl.acceptOffer);
 router.post('/offers/:orderId/decline', ctrl.declineOffer);
 
 // Active job & lifecycle endpoints
-router.get('/active', ctrl.getActiveDelivery);
+router.get('/active', ctrl.getActiveDeliveries);
+router.get('/active/:orderId', ctrl.getActiveDelivery);
 router.get('/history', ctrl.getHistory);
 router.get('/earnings', ctrl.getEarnings);
 router.post('/orders/:orderId/pickup/confirm', ctrl.confirmPickup);

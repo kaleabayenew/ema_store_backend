@@ -44,6 +44,10 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_code VARCHAR(20)`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted_at TIMESTAMP`);
       await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_rejected_at TIMESTAMPTZ`);
+      // Structured drop-off coordinates parsed from the customer's "Pin:" —
+      // stored so riders/navigators never have to re-parse the address text.
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS dropoff_lat DOUBLE PRECISION`);
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS dropoff_lng DOUBLE PRECISION`);
       // Live tracking: last GPS fix reported by the rider app, and the shop pin.
       await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION`);
       await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION`);
@@ -96,6 +100,12 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       );
       await db.query(
         `CREATE INDEX IF NOT EXISTS idx_order_payouts_order ON order_payouts(order_id)`,
+      );
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS delivery_overdue_alerts (
+           order_id UUID PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+           notified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`,
       );
     })().catch((err) => {
       schemaPromise = null; // retry on next call

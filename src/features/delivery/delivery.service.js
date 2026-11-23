@@ -96,27 +96,52 @@ async function updateAgentLocation(rawCode, lat, lng) {
 }
 
 /**
- * Auto-release orders a rider accepted but never picked up — the partner
- * handover was never confirmed, so after 24h the assignment is stale.
- * Without this the rider stays "busy" forever and the order never
- * returns to the offer pool.
+ * Keep overdue deliveries assigned, but notify admins only once per order.
  */
-async function releaseStalePickups() {
-  await pool.query(
-    `UPDATE orders
-        SET delivery_agent_id = NULL,
-            delivery_accepted_at = NULL,
-            updated_at = NOW()
-      WHERE delivery_agent_id IS NOT NULL
-        AND handed_over_at IS NULL
-        AND delivered_at IS NULL
-        AND delivery_accepted_at < NOW() - INTERVAL '24 hours'`,
+async function notifyOverdueDeliveries() {
+  const { rows: admins } = await pool.query(
+    `SELECT id FROM users WHERE UPPER(role) IN ('ADMIN', 'SUPER_ADMIN')`,
   );
+  if (admins.length === 0) return;
+
+  const { rows: overdueRows } = await pool.query(
+    `INSERT INTO delivery_overdue_alerts (order_id)
+     SELECT id
+     FROM orders
+     WHERE delivery_agent_id IS NOT NULL
+       AND delivered_at IS NULL
+       AND UPPER(COALESCE(status, '')) NOT IN (
+         'CANCELLED', 'CANCELED', 'DELIVERED', 'COMPLETED', 'RETURNED', 'REFUNDED', 'FAILED'
+       )
+       AND delivery_accepted_at < NOW() - INTERVAL '24 hours'
+       AND NOT EXISTS (
+         SELECT 1 FROM delivery_overdue_alerts doa WHERE doa.order_id = orders.id
+       )
+     ON CONFLICT (order_id) DO NOTHING
+     RETURNING order_id`,
+  );
+  if (overdueRows.length === 0) return;
+
+  for (const overdue of overdueRows) {
+    for (const admin of admins) {
+      safeSendNotification(
+        admin.id,
+        'Delivery overdue',
+        `Order ${String(overdue.order_id).slice(0, 8).toUpperCase()} has been active for over 24 hours and needs review.`,
+        { orderId: overdue.order_id, type: 'DELIVERY_OVERDUE' },
+      );
+    }
+  }
+}
+
+async function processOverdueDeliveries() {
+  await ensureOrderFlowSchema();
+  await notifyOverdueDeliveries();
 }
 
 async function listOffers(rawCode) {
   await ensureOrderFlowSchema();
-  await releaseStalePickups();
+  await notifyOverdueDeliveries();
   let agent = null;
   if (rawCode) {
     try {
@@ -258,7 +283,7 @@ async function listOffers(rawCode) {
 /**
  * Step 3 & 4: Rider accepts an offer.
  * Concurrency row-locking: first rider wins; second gets 409 ORDER_TAKEN.
- * A rider can hold only ONE active order at a time.
+ * The rider may hold multiple active orders; each order remains independently locked.
  */
 async function acceptOffer(rawCode, orderId) {
   await ensureOrderFlowSchema();
@@ -283,24 +308,8 @@ async function acceptOffer(rawCode, orderId) {
       );
     }
 
-    // 1. Check if this rider already holds an active order
-    const { rows: activeRows } = await client.query(
-      `SELECT id FROM orders
-       WHERE delivery_agent_id = $1
-         AND status IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED')
-         AND delivered_at IS NULL
-       LIMIT 1`,
-      [agent.id],
-    );
-    if (activeRows.length > 0) {
-      throw new AppError(
-        'You already have an active delivery in progress. Complete it before accepting another.',
-        400,
-        'RIDER_HAS_ACTIVE_ORDER',
-      );
-    }
-
-    // 2. Lock target order for update
+    // Lock the target order before assigning it; the agent-row lock allows
+    // this rider to accept multiple orders without racing the assignment.
     const { rows } = await client.query(
       `SELECT id, status, payment_status, payment_method,
               delivery_agent_id, user_id, delivery_code
@@ -310,6 +319,11 @@ async function acceptOffer(rawCode, orderId) {
     const order = rows[0];
     if (!order) {
       throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    }
+
+    if (order.delivery_agent_id === agent.id) {
+      await client.query('COMMIT');
+      return { accepted: true, orderId, order, alreadyAssigned: true };
     }
 
     const acceptanceBlock = getOfferAcceptanceBlock(order);
@@ -425,9 +439,9 @@ async function declineOffer(rawCode, orderId) {
  * Step 4: After accept, rider gets full UNREDACTED details
  * (partner info + customer info).
  */
-async function getActiveDelivery(rawCode) {
+async function getActiveJobs(rawCode, orderId = null) {
   await ensureOrderFlowSchema();
-  await releaseStalePickups();
+  if (!orderId) await notifyOverdueDeliveries();
   // Unknown/inactive agent codes must not 401 here — the rider app polls
   // this endpoint before listing offers, and a failure would hide the whole
   // Available tab. No recognised agent simply means no active delivery.
@@ -435,12 +449,14 @@ async function getActiveDelivery(rawCode) {
   try {
     agent = await findAgent(rawCode);
   } catch (_) {
-    return null;
+    return [];
   }
 
   const { rows } = await pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at, o.delivery_accepted_at,
+            o.delivery_accepted_at + INTERVAL '24 hours' AS delivery_deadline_at,
+            (o.delivery_accepted_at < NOW() - INTERVAL '24 hours') AS is_overdue,
             o.handover_requested_at, o.handover_proof, o.handed_over_at,
             o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
             o.customer_accepted_at, o.customer_rejected_at, o.payment_status,
@@ -460,14 +476,16 @@ async function getActiveDelivery(rawCode) {
      WHERE o.delivery_agent_id = $1
        AND o.status IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED')
        AND o.delivered_at IS NULL
+       AND ($2::text IS NULL OR o.id::text = $2)
      ORDER BY o.delivery_accepted_at DESC NULLS LAST
-     LIMIT 1`,
-    [agent.id],
+     `,
+    [agent.id, orderId],
   );
 
-  if (rows.length === 0) return null;
-  const r = rows[0];
+  const activeRows = rows;
+  if (activeRows.length === 0) return [];
 
+  const activeIds = activeRows.map((row) => row.id);
   const { rows: itemRows } = await pool.query(
     `SELECT oi.order_id, p.name_en AS name, oi.quantity, oi.price_at_order,
             p.partner_id,
@@ -477,79 +495,103 @@ async function getActiveDelivery(rawCode) {
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
      LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
-     WHERE oi.order_id = $1
+     WHERE oi.order_id = ANY($1::uuid[])
      ORDER BY oi.created_at`,
-    [r.id],
+    [activeIds],
   );
 
-  const job = {
-    id: r.id,
-    orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
-    totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
-    paymentMethod: r.payment_method || '',
-    shippingAddress: r.shipping_address || '',
-    dropoffLat: parseAddressPin(r.shipping_address).lat,
-    dropoffLng: parseAddressPin(r.shipping_address).lng,
-    deliveryCode: r.delivery_code || null,
-    status: r.status,
-    createdAt: r.created_at,
-    deliveryAcceptedAt: r.delivery_accepted_at,
-    handoverRequestedAt: r.handover_requested_at,
-    handoverProof: r.handover_proof,
-    handedOverAt: r.handed_over_at,
-    deliveryRequestedAt: r.delivery_requested_at,
-    riderArrivedAt: r.rider_arrived_at,
-    deliveryProof: r.delivery_proof,
-    deliveredAt: r.delivered_at,
-    // Step 4: Unredacted details visible to assigned rider
-    customerName: r.customer_name || 'Customer',
-    customerPhone: r.customer_phone || null,
-    shopName: r.shop_name || 'Ema Store Partner',
-    shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
-    shopPhone: r.shop_phone || null,
-    items: itemRows.map((i) => ({
-      name: i.name || 'Product',
-      quantity: Number(i.quantity) || 1,
-      price: Number(i.price_at_order) || 0,
-      partnerId: i.partner_id || null,
-      shopName: i.shop_name || null,
-      shopAddress: i.shop_address || null,
-      shopLat: i.shop_lat ?? null,
-      shopLng: i.shop_lng ?? null,
-    })),
-    deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
-    riderEarningCents: (() => {
-      const fee = Number(r.delivery_fee_cents) || 0;
-      if (fee <= 0) return null;
-      return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
-    })(),
-    legs: (() => {
-      const byPartner = new Map();
-      for (const it of itemRows) {
-        const key = it.partner_id || it.shop_name || 'unknown';
-        if (!byPartner.has(key)) {
-          byPartner.set(key, {
-            shopName: it.shop_name || 'Ema Store Partner',
-            shopAddress: it.shop_address || 'Addis Ababa, Ethiopia',
-            shopLat: it.shop_lat ?? null,
-            shopLng: it.shop_lng ?? null,
-            items: [],
-          });
-        }
-        byPartner.get(key).items.push(`${it.name || 'Product'} x${Number(it.quantity) || 1}`);
-      }
-      return [...byPartner.values()].map((l) => ({
-        shopName: l.shopName,
-        shopAddress: l.shopAddress,
-        shopLat: l.shopLat,
-        shopLng: l.shopLng,
-        items: l.items,
-      }));
-    })(),
-  };
+  const itemsByOrder = new Map();
+  for (const item of itemRows) {
+    const items = itemsByOrder.get(item.order_id) || [];
+    items.push(item);
+    itemsByOrder.set(item.order_id, items);
+  }
 
-  await applyFeeBackfill(job);
-  return job;
+  const jobs = [];
+  for (const r of activeRows) {
+    const orderItems = itemsByOrder.get(r.id) || [];
+    const job = {
+      id: r.id,
+      orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
+      totalAmount: Number(r.total_amount) || (r.total_cents ? r.total_cents / 100 : 0),
+      paymentMethod: r.payment_method || '',
+      paymentStatus: r.payment_status || 'PENDING',
+      shippingAddress: r.shipping_address || '',
+      dropoffLat: parseAddressPin(r.shipping_address).lat,
+      dropoffLng: parseAddressPin(r.shipping_address).lng,
+      deliveryCode: r.delivery_code || null,
+      status: r.status,
+      createdAt: r.created_at,
+      deliveryAcceptedAt: r.delivery_accepted_at,
+      deliveryDeadlineAt: r.delivery_deadline_at,
+      isOverdue: r.is_overdue === true,
+      handoverRequestedAt: r.handover_requested_at,
+      handoverProof: r.handover_proof,
+      handedOverAt: r.handed_over_at,
+      deliveryRequestedAt: r.delivery_requested_at,
+      riderArrivedAt: r.rider_arrived_at,
+      deliveryProof: r.delivery_proof,
+      deliveredAt: r.delivered_at,
+      // Step 4: Unredacted details visible to assigned rider
+      customerName: r.customer_name || 'Customer',
+      customerPhone: r.customer_phone || null,
+      shopName: r.shop_name || 'Ema Store Partner',
+      shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
+      shopPhone: r.shop_phone || null,
+      items: orderItems.map((i) => ({
+        name: i.name || 'Product',
+        quantity: Number(i.quantity) || 1,
+        price: Number(i.price_at_order) || 0,
+        partnerId: i.partner_id || null,
+        shopName: i.shop_name || null,
+        shopAddress: i.shop_address || null,
+        shopLat: i.shop_lat ?? null,
+        shopLng: i.shop_lng ?? null,
+      })),
+      deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+      riderEarningCents: (() => {
+        const fee = Number(r.delivery_fee_cents) || 0;
+        if (fee <= 0) return null;
+        return Math.max(0, fee - (Number(r.rider_commission_cents) || 0));
+      })(),
+      legs: (() => {
+        const byPartner = new Map();
+        for (const it of orderItems) {
+          const key = it.partner_id || it.shop_name || 'unknown';
+          if (!byPartner.has(key)) {
+            byPartner.set(key, {
+              shopName: it.shop_name || 'Ema Store Partner',
+              shopAddress: it.shop_address || 'Addis Ababa, Ethiopia',
+              shopLat: it.shop_lat ?? null,
+              shopLng: it.shop_lng ?? null,
+              items: [],
+            });
+          }
+          byPartner.get(key).items.push(`${it.name || 'Product'} x${Number(it.quantity) || 1}`);
+        }
+        return [...byPartner.values()].map((l) => ({
+          shopName: l.shopName,
+          shopAddress: l.shopAddress,
+          shopLat: l.shopLat,
+          shopLng: l.shopLng,
+          items: l.items,
+        }));
+      })(),
+    };
+    await applyFeeBackfill(job);
+    jobs.push(job);
+  }
+
+  return jobs;
+}
+
+async function getActiveDeliveries(rawCode) {
+  return getActiveJobs(rawCode);
+}
+
+async function getActiveDelivery(rawCode, orderId = null) {
+  const jobs = await getActiveJobs(rawCode, orderId);
+  return jobs[0] || null;
 }
 
 /**
@@ -1043,6 +1085,7 @@ module.exports = {
   listOffers,
   acceptOffer,
   declineOffer,
+  getActiveDeliveries,
   getActiveDelivery,
   confirmPickup,
   scanDelivery,
@@ -1050,4 +1093,5 @@ module.exports = {
   getDeliveryHistory,
   getEarnings,
   updateAgentLocation,
+  processOverdueDeliveries,
 };

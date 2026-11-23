@@ -26,6 +26,29 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       'COD_DISABLED',
     );
   }
+
+  // ── Delivery location is mandatory and fully specified ──────────────
+  // The customer must provide a complete address AND drop a map pin — the
+  // pin drives the delivery-fee distance and the rider's navigation.
+  const addrText = String(shippingAddress || '').trim();
+  if (addrText.length < 10) {
+    throw new AppError(
+      'A complete delivery address is required.',
+      400,
+      'ADDRESS_REQUIRED',
+    );
+  }
+  const dropPin = parseAddressPin(addrText);
+  if (dropPin.lat == null || dropPin.lng == null) {
+    throw new AppError(
+      'Please drop a pin on the map for your delivery location.',
+      400,
+      'LOCATION_PIN_REQUIRED',
+    );
+  }
+  // Delivery method is system-controlled — the customer never picks a
+  // courier; every order is fulfilled by the rider network.
+  deliveryMethod = 'RIDER_DELIVERY';
   // Idempotent replay: a retried checkout (e.g. after a client timeout)
   // returns the original order instead of charging/creating twice.
   if (idempotencyKey) {
@@ -252,10 +275,10 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
       (productCents * partnerCommissionPct) / 100,
     );
     const { rows: orderRows } = await client.query(`
-      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents, delivery_code, payment_status, delivery_fee_cents, service_fee_cents, partner_commission_cents, rider_commission_cents)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      INSERT INTO orders (user_id, total_cents, total_amount, status, shipping_address, payment_method, delivery_method, payment_id, idempotency_key, coupon_id, coupon_code, discount_cents, delivery_code, payment_status, delivery_fee_cents, service_fee_cents, partner_commission_cents, rider_commission_cents, dropoff_lat, dropoff_lng)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       RETURNING *
-    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents, deliveryCode, paymentStatus, deliveryFeeCents, serviceFeeCents, orderPartnerCommissionCents, riderCommissionCents]);
+    `, [userId, totalCents, totalCents / 100.0, orderStatus, shippingAddress, paymentMethod, deliveryMethod, paymentId, idempotencyKey || null, couponId, couponCodeApplied, couponDiscountCents, deliveryCode, paymentStatus, deliveryFeeCents, serviceFeeCents, orderPartnerCommissionCents, riderCommissionCents, dropPin.lat, dropPin.lng]);
 
     const order = orderRows[0];
 

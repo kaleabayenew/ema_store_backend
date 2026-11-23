@@ -73,9 +73,21 @@ const getEarnings = async (req, res, next) => {
   }
 };
 
+const getActiveDeliveries = async (req, res, next) => {
+  try {
+    const jobs = await service.getActiveDeliveries(agentCode(req));
+    ok(res, { jobs, job: jobs[0] || null });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getActiveDelivery = async (req, res, next) => {
   try {
-    const result = await service.getActiveDelivery(agentCode(req));
+    const result = await service.getActiveDelivery(
+      agentCode(req),
+      req.params.orderId,
+    );
     ok(res, { job: result });
   } catch (err) {
     next(err);
@@ -119,6 +131,7 @@ module.exports = {
   listOffers,
   acceptOffer,
   declineOffer,
+  getActiveDeliveries,
   getActiveDelivery,
   getHistory,
   getEarnings,
