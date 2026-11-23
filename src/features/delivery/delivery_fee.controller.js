@@ -27,10 +27,13 @@ const previewFee = async (req, res, next) => {
     ok(res, {
       feeCents: result.feeCents,
       feeEtb: result.feeCents / 100,
-      serviceFeeCents: settings.serviceFeeCents,
-      serviceFeeEtb: settings.serviceFeeCents / 100,
+      legsCount: result.legs.length,
+      serviceFeeCents: fee.serviceFeeForLegs(settings, result.legs.length),
+      serviceFeeEtb: fee.serviceFeeForLegs(settings, result.legs.length) / 100,
       legs: result.legs.map((l) => ({
         feeCents: l.feeCents,
+        shopName: l.shopName,
+        shopAddress: l.shopAddress,
         breakdown: l.breakdown,
       })),
     });

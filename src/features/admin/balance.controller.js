@@ -28,7 +28,11 @@ const getBalance = async (req, res, next) => {
             FROM order_items oi
             JOIN orders od ON od.id = oi.order_id
             WHERE od.status IN ('DELIVERED', 'COMPLETED')
-          ), 0)::bigint AS partner_revenue
+          ), 0)::bigint AS partner_revenue,
+          COALESCE((
+            SELECT SUM(amount) * 100 FROM wallet_transactions
+            WHERE type = 'ORDER_PAYOUT' AND status = 'COMPLETED'
+          ), 0)::bigint AS total_paid_out
         FROM orders o
         WHERE o.status NOT IN ('CANCELLED', 'REFUNDED')
       `),
@@ -94,6 +98,7 @@ const getBalance = async (req, res, next) => {
         serviceCharges,
         partnerCommissions,
         riderCommissions,
+        totalPaidOutCents: Number(s.total_paid_out || 0),
       },
       entries: entries.slice(0, 100),
     });

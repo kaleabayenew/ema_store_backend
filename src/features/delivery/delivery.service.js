@@ -127,9 +127,14 @@ async function listOffers(rawCode) {
   const itemsByOrder = {};
   if (orderIds.length > 0) {
     const { rows: itemRows } = await pool.query(
-      `SELECT oi.order_id, p.name_en AS name, oi.quantity
+      `SELECT oi.order_id, p.name_en AS name, oi.quantity,
+              p.partner_id,
+              COALESCE(pp.shop_name, pp.business_name) AS shop_name,
+              COALESCE(pp.address, pp.city) AS shop_address,
+              pp.shop_lat, pp.shop_lng
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
+       LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
        WHERE oi.order_id = ANY($1::uuid[])
        ORDER BY oi.created_at`,
       [orderIds],
@@ -138,6 +143,11 @@ async function listOffers(rawCode) {
       (itemsByOrder[r.order_id] ||= []).push({
         name: r.name || 'Product',
         quantity: Number(r.quantity) || 0,
+        partnerId: r.partner_id || null,
+        shopName: r.shop_name || null,
+        shopAddress: r.shop_address || null,
+        shopLat: r.shop_lat ?? null,
+        shopLng: r.shop_lng ?? null,
       });
     }
   }
@@ -178,6 +188,31 @@ async function listOffers(rawCode) {
       shopName: r.shop_name || 'Ema Store Partner',
       shopAddress: r.shop_address || 'Addis Ababa, Ethiopia',
       items: itemsByOrder[r.id] || [],
+      // Multi-shop orders: one leg per partner location so the rider app
+      // can show each pickup point separately.
+      legs: (() => {
+        const byPartner = new Map();
+        for (const it of itemsByOrder[r.id] || []) {
+          const key = it.partnerId || it.shopName || 'unknown';
+          if (!byPartner.has(key)) {
+            byPartner.set(key, {
+              shopName: it.shopName || 'Ema Store Partner',
+              shopAddress: it.shopAddress || 'Addis Ababa, Ethiopia',
+              shopLat: it.shopLat ?? null,
+              shopLng: it.shopLng ?? null,
+              items: [],
+            });
+          }
+          byPartner.get(key).items.push(`${it.name} x${it.quantity}`);
+        }
+        return [...byPartner.values()].map((l) => ({
+          shopName: l.shopName,
+          shopAddress: l.shopAddress,
+          shopLat: l.shopLat,
+          shopLng: l.shopLng,
+          items: l.items,
+        }));
+      })(),
       createdAt: r.created_at,
     })),
   };
@@ -444,6 +479,11 @@ async function confirmPickup(rawCode, orderId) {
       [orderId],
     );
     updatedOrder = updatedRows[0];
+
+    // Escrow: deposit 50% of each partner's share to their wallet.
+    const escrow = require('./escrow.service');
+    await escrow.settlePickupPayouts(client, order);
+
     await client.query('COMMIT');
 
     // Notify customer
@@ -607,9 +647,14 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
   const itemsByOrder = {};
   if (orderIds.length > 0) {
     const { rows: itemRows } = await pool.query(
-      `SELECT oi.order_id, p.name_en AS name, oi.quantity
+      `SELECT oi.order_id, p.name_en AS name, oi.quantity,
+              p.partner_id,
+              COALESCE(pp.shop_name, pp.business_name) AS shop_name,
+              COALESCE(pp.address, pp.city) AS shop_address,
+              pp.shop_lat, pp.shop_lng
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
+       LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
        WHERE oi.order_id = ANY($1::uuid[])
        ORDER BY oi.created_at`,
       [orderIds],
@@ -618,6 +663,11 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
       (itemsByOrder[r.order_id] ||= []).push({
         name: r.name || 'Product',
         quantity: Number(r.quantity) || 0,
+        partnerId: r.partner_id || null,
+        shopName: r.shop_name || null,
+        shopAddress: r.shop_address || null,
+        shopLat: r.shop_lat ?? null,
+        shopLng: r.shop_lng ?? null,
       });
     }
   }
@@ -816,8 +866,26 @@ async function getEarnings(rawCode) {
   );
   const t = totals[0] || {};
 
+  // Wallet balance = escrow payouts already deposited to the rider's account.
+  let walletCents = 0;
+  const { rows: agentUserRows } = await pool.query(
+    `SELECT u.id AS user_id FROM delivery_agents da
+     JOIN users u ON u.phone = da.phone WHERE da.id = $1`,
+    [agent.id],
+  );
+  if (agentUserRows[0]?.user_id) {
+    const { rows: walletRows } = await pool.query(
+      `SELECT COALESCE(SUM(amount) * 100, 0)::bigint AS settled
+       FROM wallet_transactions
+       WHERE user_id = $1 AND type = 'ORDER_PAYOUT' AND status = 'COMPLETED'`,
+      [agentUserRows[0].user_id],
+    );
+    walletCents = Number(walletRows[0]?.settled ?? 0);
+  }
+
   return {
     agent: { code: agent.agent_code, name: agent.full_name },
+    walletBalanceCents: walletCents,
     todayCents: Math.round(Number(t.today_cents || 0)),
     weekCents: Math.round(Number(t.week_cents || 0)),
     totalCents: Math.round(Number(t.total_cents || 0)),

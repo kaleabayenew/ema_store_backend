@@ -20,7 +20,8 @@ const DEFAULT_SETTINGS = {
   minFeeCents: 2000,         // never below the base fee
   maxFeeCents: 15000,        // hard cap 150 ETB
   // Platform commission settings
-  serviceFeeCents: 2000,     // flat service fee charged to the customer
+  serviceFeeCents: 2000,     // flat service fee charged to the customer (first shop leg)
+  serviceFeeExtraLegPct: 50, // % of serviceFeeCents charged per additional shop leg
   partnerCommissionPct: 1.0, // % of product subtotal deducted from partner
   riderCommissionPct: 15.0,  // % of delivery fee deducted from rider
 };
@@ -35,6 +36,7 @@ function ensureFeeSchema() {
       await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_commission_cents INTEGER DEFAULT 0`);
       await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS commission_cents INTEGER DEFAULT 0`);
       await pool.query(`ALTER TABLE delivery_fee_settings ADD COLUMN IF NOT EXISTS service_fee_cents INTEGER NOT NULL DEFAULT 2000`);
+      await pool.query(`ALTER TABLE delivery_fee_settings ADD COLUMN IF NOT EXISTS service_fee_extra_leg_pct DOUBLE PRECISION NOT NULL DEFAULT 50`);
       await pool.query(`ALTER TABLE delivery_fee_settings ADD COLUMN IF NOT EXISTS partner_commission_pct DOUBLE PRECISION NOT NULL DEFAULT 1.0`);
       await pool.query(`ALTER TABLE delivery_fee_settings ADD COLUMN IF NOT EXISTS rider_commission_pct DOUBLE PRECISION NOT NULL DEFAULT 15.0`);
       await pool.query(`
@@ -52,6 +54,7 @@ function ensureFeeSchema() {
           min_fee_cents INTEGER NOT NULL DEFAULT 2000,
           max_fee_cents INTEGER NOT NULL DEFAULT 15000,
           service_fee_cents INTEGER NOT NULL DEFAULT 2000,
+          service_fee_extra_leg_pct DOUBLE PRECISION NOT NULL DEFAULT 50,
           partner_commission_pct DOUBLE PRECISION NOT NULL DEFAULT 1.0,
           rider_commission_pct DOUBLE PRECISION NOT NULL DEFAULT 15.0,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -85,6 +88,7 @@ async function getSettings() {
     minFeeCents: r.min_fee_cents ?? DEFAULT_SETTINGS.minFeeCents,
     maxFeeCents: r.max_fee_cents ?? DEFAULT_SETTINGS.maxFeeCents,
     serviceFeeCents: r.service_fee_cents ?? DEFAULT_SETTINGS.serviceFeeCents,
+    serviceFeeExtraLegPct: Number(r.service_fee_extra_leg_pct ?? DEFAULT_SETTINGS.serviceFeeExtraLegPct),
     partnerCommissionPct: Number(r.partner_commission_pct ?? DEFAULT_SETTINGS.partnerCommissionPct),
     riderCommissionPct: Number(r.rider_commission_pct ?? DEFAULT_SETTINGS.riderCommissionPct),
   };
@@ -103,6 +107,7 @@ const SETTING_FIELDS = {
   minFeeCents: 'min_fee_cents',
   maxFeeCents: 'max_fee_cents',
   serviceFeeCents: 'service_fee_cents',
+  serviceFeeExtraLegPct: 'service_fee_extra_leg_pct',
   partnerCommissionPct: 'partner_commission_pct',
   riderCommissionPct: 'rider_commission_pct',
 };
@@ -316,9 +321,35 @@ async function computeOrderFee({ items = [], shippingAddress }) {
     }
     const leg = await computeLegFee({ items: legItems, shippingAddress, shopLat, shopLng });
     totalFeeCents += leg.feeCents;
-    legs.push({ partnerId, ...leg });
+    let shopName = null;
+    let shopAddress = null;
+    if (partnerId !== 'unknown') {
+      const { rows: shopRows } = await pool.query(
+        `SELECT COALESCE(shop_name, business_name) AS shop_name,
+                COALESCE(address, city) AS shop_address
+         FROM partner_profile WHERE user_id = $1 LIMIT 1`,
+        [partnerId],
+      );
+      shopName = shopRows[0]?.shop_name ?? null;
+      shopAddress = shopRows[0]?.shop_address ?? null;
+    }
+    legs.push({
+      partnerId, shopName, shopAddress,
+      shopLat, shopLng, ...leg,
+    });
   }
   return { feeCents: totalFeeCents, legs };
+}
+
+/**
+ * Customer service fee for an order: full fee for the first shop leg,
+ * discounted fee for each additional partner location.
+ */
+function serviceFeeForLegs(settings, legsCount) {
+  const legs = Math.max(1, legsCount || 1);
+  const extra = legs - 1;
+  return settings.serviceFeeCents +
+    Math.round((settings.serviceFeeCents * settings.serviceFeeExtraLegPct * extra) / 100);
 }
 
 /** Resolve product names/partner for fee preview or order creation. */
@@ -349,9 +380,9 @@ async function resolveItemsForFee(rawItems) {
  * deliveryFeeCents: computed delivery fee.
  * Returns the customer service fee plus per-party commission amounts.
  */
-async function computeCommissions({ productCents = 0, deliveryFeeCents = 0 }) {
+async function computeCommissions({ productCents = 0, deliveryFeeCents = 0, legsCount = 1 }) {
   const s = await getSettings();
-  const serviceFeeCents = s.serviceFeeCents;
+  const serviceFeeCents = serviceFeeForLegs(s, legsCount);
   const partnerCommissionCents = Math.round((productCents * s.partnerCommissionPct) / 100);
   const riderCommissionCents = Math.round((deliveryFeeCents * s.riderCommissionPct) / 100);
   return { serviceFeeCents, partnerCommissionCents, riderCommissionCents };
@@ -364,5 +395,6 @@ module.exports = {
   computeLegFee,
   computeOrderFee,
   computeCommissions,
+  serviceFeeForLegs,
   resolveItemsForFee,
 };
