@@ -7,6 +7,7 @@ const {
   safeSendNotification,
 } = require('../../orders/order_flow');
 const { resolveAgentDisplayCode } = require('../../delivery/agent_qr');
+const { getOfferAcceptanceBlock } = require('../../delivery/offer_rules');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -207,7 +208,8 @@ const PARTNER_ALLOWED_STATUSES = ['CONFIRMED', 'PACKED'];
 
 async function lockPartnerOrder(client, partnerId, orderId) {
   const { rows } = await client.query(
-    `SELECT orders.id, orders.status, orders.delivery_agent_id
+    `SELECT orders.id, orders.status, orders.delivery_agent_id,
+            orders.payment_status, orders.payment_method
      FROM orders
      WHERE orders.id = $1
        AND EXISTS (
@@ -220,6 +222,14 @@ async function lockPartnerOrder(client, partnerId, orderId) {
   );
   if (rows.length === 0) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
   return rows[0];
+}
+
+function notifyRidersOfNewOffer(orderId) {
+  require('../../delivery/delivery.service')
+    .notifyRidersOfNewOffer(orderId)
+    .catch((err) =>
+      console.error('[notify] Rider offer notification failed:', err.message || err),
+    );
 }
 
 async function updateStatus(partnerId, orderId, status) {
@@ -252,9 +262,14 @@ async function updateStatus(partnerId, orderId, status) {
   }
 
   const client = await pool.connect();
+  let shouldNotifyRiders = false;
   try {
     await client.query('BEGIN');
     const order = await lockPartnerOrder(client, partnerId, orderId);
+    shouldNotifyRiders =
+      !order.delivery_agent_id &&
+      Boolean(getOfferAcceptanceBlock(order)) &&
+      !getOfferAcceptanceBlock({ ...order, status: next });
     await client.query(
       `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
       [next, orderId],
@@ -266,6 +281,7 @@ async function updateStatus(partnerId, orderId, status) {
   } finally {
     client.release();
   }
+  if (shouldNotifyRiders) notifyRidersOfNewOffer(orderId);
   return fetchOrder(partnerId, orderId);
 }
 
@@ -277,9 +293,14 @@ async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
     throw new AppError('paymentMethod is required.', 400, 'MISSING_FIELDS');
   }
   const client = await pool.connect();
+  let shouldNotifyRiders = false;
   try {
     await client.query('BEGIN');
-    await lockPartnerOrder(client, partnerId, orderId);
+    const order = await lockPartnerOrder(client, partnerId, orderId);
+    shouldNotifyRiders =
+      !order.delivery_agent_id &&
+      Boolean(getOfferAcceptanceBlock(order)) &&
+      !getOfferAcceptanceBlock({ ...order, payment_method: method });
     await client.query(
       `UPDATE orders SET payment_method = $1, updated_at = NOW() WHERE id = $2`,
       [method.slice(0, 100), orderId],
@@ -291,6 +312,7 @@ async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
   } finally {
     client.release();
   }
+  if (shouldNotifyRiders) notifyRidersOfNewOffer(orderId);
   return fetchOrder(partnerId, orderId);
 }
 
