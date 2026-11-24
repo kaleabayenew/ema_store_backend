@@ -86,30 +86,47 @@ async function sendPush(token, notification, data = {}) {
   const stringData = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, String(v)]),
   );
+  const dataOnly = stringData.localNotification === 'true';
+  if (dataOnly) {
+    stringData.title = stringData.title || notification.title;
+    stringData.body = stringData.body || notification.body;
+  }
 
   const message = {
     token,
-    notification: {
-      title: notification.title,
-      body:  notification.body,
-    },
-    data: stringData,
-    android: {
-      priority: 'high',
+    ...(!dataOnly && {
       notification: {
-        sound:       'default',
-        channelId:   data.channelId || 'eco_orders',
-        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        title: notification.title,
+        body: notification.body,
       },
-    },
-    apns: {
-      payload: {
-        aps: {
-          sound: 'default',
-          badge: 1,
+    }),
+    data: stringData,
+    android: dataOnly
+      ? { priority: 'high' }
+      : {
+          priority: 'high',
+          notification: {
+            sound: 'default',
+            channelId: data.channelId || 'eco_orders',
+            clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          },
         },
-      },
-    },
+    apns: dataOnly
+      ? {
+          headers: {
+            'apns-push-type': 'background',
+            'apns-priority': '5',
+          },
+          payload: { aps: { 'content-available': 1 } },
+        }
+      : {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+            },
+          },
+        },
   };
 
   try {
@@ -146,24 +163,41 @@ async function sendMulticastPush(tokens, notification, data = {}) {
   const stringData = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, String(v)]),
   );
+  const dataOnly = stringData.localNotification === 'true';
+  if (dataOnly) {
+    stringData.title = stringData.title || notification.title;
+    stringData.body = stringData.body || notification.body;
+  }
 
   const message = {
     tokens: validTokens,
-    notification: {
-      title: notification.title,
-      body:  notification.body,
-    },
-    data: stringData,
-    android: {
-      priority: 'high',
+    ...(!dataOnly && {
       notification: {
-        sound:     'default',
-        channelId: data.channelId || 'eco_orders',
+        title: notification.title,
+        body: notification.body,
       },
-    },
-    apns: {
-      payload: { aps: { sound: 'default', badge: 1 } },
-    },
+    }),
+    data: stringData,
+    android: dataOnly
+      ? { priority: 'high' }
+      : {
+          priority: 'high',
+          notification: {
+            sound: 'default',
+            channelId: data.channelId || 'eco_orders',
+          },
+        },
+    apns: dataOnly
+      ? {
+          headers: {
+            'apns-push-type': 'background',
+            'apns-priority': '5',
+          },
+          payload: { aps: { 'content-available': 1 } },
+        }
+      : {
+          payload: { aps: { sound: 'default', badge: 1 } },
+        },
   };
 
   try {
