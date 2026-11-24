@@ -149,4 +149,212 @@ const getBalance = async (req, res, next) => {
   }
 };
 
-module.exports = { getBalance };
+const IN_FLIGHT = `('CONFIRMED','PROCESSING','PACKED','SHIPPED')`;
+
+// Per-person breakdowns for each Balance card. Every query returns
+// name/detail/amount_cents (+ optional orders count) and a total_count
+// window column for pagination.
+const BREAKDOWNS = {
+  // Platform balance = service fee + partner commission + rider commission
+  platform: `
+    SELECT u.full_name AS name, 'Customer' AS detail,
+           SUM(COALESCE(o.service_fee_cents,0) + COALESCE(o.partner_commission_cents,0)
+               + COALESCE(o.rider_commission_cents,0))::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM orders o JOIN users u ON u.id = o.user_id
+    WHERE o.status IN ('DELIVERED','COMPLETED')
+      AND (COALESCE(o.service_fee_cents,0) + COALESCE(o.partner_commission_cents,0)
+           + COALESCE(o.rider_commission_cents,0)) > 0
+    GROUP BY u.id, u.full_name
+    ORDER BY amount_cents DESC`,
+
+  // Rider earnings (net of rider commission) per delivery agent
+  rider: `
+    SELECT COALESCE(a.full_name, 'Unassigned rider') AS name,
+           COALESCE(a.agent_code, '—') AS detail,
+           SUM(o.delivery_fee_cents - COALESCE(o.rider_commission_cents,0))::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM orders o
+    LEFT JOIN delivery_agents a ON a.id = o.delivery_agent_id
+    WHERE o.status IN ('DELIVERED','COMPLETED')
+      AND COALESCE(o.delivery_fee_cents,0) > 0
+    GROUP BY a.id, a.full_name, a.agent_code
+    HAVING SUM(o.delivery_fee_cents - COALESCE(o.rider_commission_cents,0)) <> 0
+    ORDER BY amount_cents DESC`,
+
+  // Partner revenue (net of commission) per shop/partner
+  partner: `
+    SELECT COALESCE(pp.shop_name, pu.full_name, 'Partner') AS name,
+           COALESCE(pu.full_name, '') AS detail,
+           SUM(oi.price_at_order * oi.quantity - COALESCE(oi.commission_cents,0))::bigint AS amount_cents,
+           COUNT(DISTINCT o.id)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id AND o.status IN ('DELIVERED','COMPLETED')
+    JOIN products p ON p.id = oi.product_id
+    LEFT JOIN users pu ON pu.id = p.partner_id
+    LEFT JOIN partner_profile pp ON pp.user_id = p.partner_id
+    GROUP BY p.partner_id, pp.shop_name, pu.full_name
+    ORDER BY amount_cents DESC`,
+
+  // Pending wallet payout/transfer requests per user
+  pendingPayouts: `
+    SELECT COALESCE(NULLIF(u.full_name,''), u.phone, 'User') AS name,
+           COALESCE(u.phone, '') AS detail,
+           SUM(ABS(wt.amount) * 100)::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM wallet_transactions wt
+    JOIN users u ON u.id = wt.user_id
+    WHERE wt.type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST') AND wt.status = 'PENDING'
+    GROUP BY u.id, u.full_name, u.phone
+    ORDER BY amount_cents DESC`,
+
+  // Service charges per customer (delivered orders)
+  service: `
+    SELECT u.full_name AS name, 'Customer' AS detail,
+           SUM(COALESCE(o.service_fee_cents,0))::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM orders o JOIN users u ON u.id = o.user_id
+    WHERE o.status IN ('DELIVERED','COMPLETED') AND COALESCE(o.service_fee_cents,0) > 0
+    GROUP BY u.id, u.full_name
+    ORDER BY amount_cents DESC`,
+
+  // Total paid out per payee (completed ORDER_PAYOUT wallet credits)
+  paidOut: `
+    SELECT COALESCE(NULLIF(u.full_name,''), u.phone, 'User') AS name,
+           COALESCE(u.phone, '') AS detail,
+           SUM(wt.amount * 100)::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM wallet_transactions wt
+    JOIN users u ON u.id = wt.user_id
+    WHERE wt.type = 'ORDER_PAYOUT' AND wt.status = 'COMPLETED'
+    GROUP BY u.id, u.full_name, u.phone
+    ORDER BY amount_cents DESC`,
+
+  // Pending partner payouts on in-flight orders (earned − already paid)
+  pendingPartner: `
+    WITH earned AS (
+      SELECT p.partner_id,
+             SUM(oi.price_at_order * oi.quantity - COALESCE(oi.commission_cents,0))::bigint AS earned,
+             COUNT(DISTINCT o.id)::int AS orders
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id AND o.status IN ${IN_FLIGHT}
+      JOIN products p ON p.id = oi.product_id
+      GROUP BY p.partner_id
+    ), paid AS (
+      SELECT op.payee_id, SUM(op.paid_cents)::bigint AS paid
+      FROM order_payouts op
+      JOIN orders o ON o.id = op.order_id AND o.status IN ${IN_FLIGHT}
+      WHERE op.payee_type = 'PARTNER'
+      GROUP BY op.payee_id
+    )
+    SELECT COALESCE(pp.shop_name, pu.full_name, 'Partner') AS name,
+           COALESCE(pu.full_name, '') AS detail,
+           GREATEST(e.earned - COALESCE(p.paid,0), 0)::bigint AS amount_cents,
+           e.orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM earned e
+    LEFT JOIN paid p ON p.payee_id = e.partner_id
+    LEFT JOIN users pu ON pu.id = e.partner_id
+    LEFT JOIN partner_profile pp ON pp.user_id = e.partner_id
+    WHERE GREATEST(e.earned - COALESCE(p.paid,0), 0) > 0
+    ORDER BY amount_cents DESC`,
+
+  // Pending rider payouts on in-flight orders (earned − already paid)
+  pendingRider: `
+    WITH earned AS (
+      SELECT o.delivery_agent_id AS agent_id,
+             SUM(CASE WHEN COALESCE(o.delivery_fee_cents,0) > 0
+                      THEN GREATEST(o.delivery_fee_cents - COALESCE(o.rider_commission_cents,0), 0)
+                      ELSE ROUND(COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) * 0.10) END)::bigint AS earned,
+             COUNT(*)::int AS orders
+      FROM orders o
+      WHERE o.status IN ${IN_FLIGHT}
+      GROUP BY o.delivery_agent_id
+    ), paid AS (
+      SELECT op.payee_id, SUM(op.paid_cents)::bigint AS paid
+      FROM order_payouts op
+      JOIN orders o ON o.id = op.order_id AND o.status IN ${IN_FLIGHT}
+      WHERE op.payee_type = 'RIDER'
+      GROUP BY op.payee_id
+    )
+    SELECT COALESCE(a.full_name, 'Unassigned rider') AS name,
+           COALESCE(a.agent_code, '—') AS detail,
+           GREATEST(e.earned - COALESCE(p.paid,0), 0)::bigint AS amount_cents,
+           e.orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM earned e
+    LEFT JOIN paid p ON p.payee_id = e.agent_id
+    LEFT JOIN delivery_agents a ON a.id = e.agent_id
+    WHERE GREATEST(e.earned - COALESCE(p.paid,0), 0) > 0
+    ORDER BY amount_cents DESC`,
+
+  // Platform cut pending on in-flight orders, per customer
+  platformPending: `
+    SELECT u.full_name AS name, 'Customer' AS detail,
+           SUM(COALESCE(o.service_fee_cents,0) + COALESCE(o.partner_commission_cents,0)
+               + COALESCE(o.rider_commission_cents,0))::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM orders o JOIN users u ON u.id = o.user_id
+    WHERE o.status IN ${IN_FLIGHT}
+      AND (COALESCE(o.service_fee_cents,0) + COALESCE(o.partner_commission_cents,0)
+           + COALESCE(o.rider_commission_cents,0)) > 0
+    GROUP BY u.id, u.full_name
+    ORDER BY amount_cents DESC`,
+
+  // Money held in escrow per customer (paid, undelivered orders)
+  escrow: `
+    SELECT u.full_name AS name, 'Customer' AS detail,
+           SUM(o.total_cents)::bigint AS amount_cents,
+           COUNT(*)::int AS orders,
+           COUNT(*) OVER()::int AS total_count
+    FROM orders o JOIN users u ON u.id = o.user_id
+    WHERE o.status IN ${IN_FLIGHT} AND o.payment_status = 'PAID'
+    GROUP BY u.id, u.full_name
+    ORDER BY amount_cents DESC`,
+};
+
+/** GET /api/v1/admin/balance/breakdown?card=<key>&page=<n>&limit=<m> */
+const getBalanceBreakdown = async (req, res, next) => {
+  try {
+    const role = String(req.user?.adminRole || req.user?.role || '').toUpperCase();
+    if (!PLATFORM_ROLES.includes(role)) {
+      throw new AppError('You do not have access to the balance page.', 403, 'FORBIDDEN');
+    }
+    const card = String(req.query.card || '');
+    const sql = BREAKDOWNS[card];
+    if (!sql) {
+      throw new AppError('Unknown balance card.', 400, 'BAD_REQUEST');
+    }
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 8));
+    const offset = (page - 1) * limit;
+
+    const { rows } = await pool.query(`${sql} LIMIT $1 OFFSET $2`, [limit, offset]);
+    const total = rows.length ? Number(rows[0].total_count || 0) : 0;
+
+    ok(res, {
+      card,
+      page,
+      limit,
+      total,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      rows: rows.map((r) => ({
+        name: r.name,
+        detail: r.detail || '',
+        amountCents: Number(r.amount_cents || 0),
+        orders: Number(r.orders || 0),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getBalance, getBalanceBreakdown };

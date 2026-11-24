@@ -381,7 +381,12 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
             pr.partner_id,
             'New Order Received',
             `You have received a new order #${order.delivery_code || order.id.slice(0, 8)}.`,
-            { orderId: order.id, type: 'NEW_ORDER', deliveryCode: order.delivery_code },
+            {
+              orderId: order.id,
+              type: 'NEW_ORDER',
+              deliveryCode: order.delivery_code,
+              localNotification: 'true',
+            },
           );
         }
       }
@@ -393,6 +398,12 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
         `Your order #${order.delivery_code || order.id.slice(0, 8)} has been confirmed!`,
         { orderId: order.id, type: 'ORDER_PLACED', deliveryCode: order.delivery_code },
       );
+
+      require('../delivery/delivery.service')
+        .notifyRidersOfNewOffer(order.id)
+        .catch((err) =>
+          console.error('[notify] Rider offer notification failed:', err.message || err),
+        );
     } catch (notifErr) {
       console.error('[notify] Order creation notification failed:', notifErr.message);
     }
@@ -795,7 +806,7 @@ async function confirmOrderPayment(orderId) {
          paid_at = COALESCE(paid_at, NOW()),
          updated_at = NOW()
      WHERE id = $1 AND COALESCE(payment_status, 'PENDING') <> 'PAID'
-     RETURNING id, payment_status`,
+     RETURNING id, status, payment_status, payment_method, delivery_agent_id`,
     [orderId],
   );
   if (rows.length === 0) {
@@ -804,6 +815,14 @@ async function confirmOrderPayment(orderId) {
     );
     if (!existing[0]) throw new AppError('Order not found', 404, 'NOT_FOUND');
     return existing[0]; // already paid — idempotent
+  }
+  const { getOfferAcceptanceBlock } = require('../delivery/offer_rules');
+  if (!rows[0].delivery_agent_id && !getOfferAcceptanceBlock(rows[0])) {
+    require('../delivery/delivery.service')
+      .notifyRidersOfNewOffer(orderId)
+      .catch((err) =>
+        console.error('[notify] Rider offer notification failed:', err.message || err),
+      );
   }
   return rows[0];
 }

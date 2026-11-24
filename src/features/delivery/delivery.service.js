@@ -134,6 +134,50 @@ async function notifyOverdueDeliveries() {
   }
 }
 
+async function notifyRidersOfNewOffer(orderId) {
+  await ensureOrderFlowSchema();
+  const { rows: orders } = await pool.query(
+    `SELECT id, status, payment_status, payment_method, delivery_agent_id,
+            delivery_code
+     FROM orders
+     WHERE id = $1 AND delivery_agent_id IS NULL`,
+    [orderId],
+  );
+  const order = orders[0];
+  if (!order || getOfferAcceptanceBlock(order)) return 0;
+
+  const { rows: riders } = await pool.query(
+    `SELECT id, fcm_token
+     FROM delivery_agents
+     WHERE is_active = TRUE
+       AND fcm_token IS NOT NULL`,
+  );
+  if (riders.length === 0) return 0;
+
+  const { sendPush } = require('../../core/config/firebase');
+  const title = 'New delivery available';
+  const body = `Order #${order.delivery_code || String(order.id).slice(0, 8)} is ready for delivery.`;
+  const results = await Promise.all(
+    riders.map(async (rider) => {
+      const result = await sendPush(rider.fcm_token, { title, body }, {
+        orderId: order.id,
+        type: 'RIDER_NEW_ORDER',
+        channelId: 'eco_offers',
+        localNotification: 'true',
+      });
+      if (result === 'INVALID_TOKEN') {
+        await pool.query(
+          `UPDATE delivery_agents SET fcm_token = NULL
+           WHERE id = $1 AND fcm_token = $2`,
+          [rider.id, rider.fcm_token],
+        );
+      }
+      return result === true;
+    }),
+  );
+  return results.filter(Boolean).length;
+}
+
 async function processOverdueDeliveries() {
   await ensureOrderFlowSchema();
   await notifyOverdueDeliveries();
@@ -953,6 +997,67 @@ async function getAgentQr(rawCode) {
  * short list of recent completed deliveries. The per-delivery earning uses
  * the same 10% rule the ride app applies to the order total.
  */
+/**
+ * Wallet transaction history for the rider's linked user account.
+ * The rider authenticates by agent code; payouts are written to
+ * wallet_transactions under the user account matched by phone (same
+ * join escrow payouts use). Returns paginated rows, newest first.
+ */
+async function getWalletTransactions(rawCode, { page = 1, limit = 20 } = {}) {
+  await ensureOrderFlowSchema();
+  let agent = null;
+  try {
+    agent = await findAgent(rawCode);
+  } catch (_) {
+    agent = null;
+  }
+  if (!agent) return { transactions: [], total: 0, page, pages: 0 };
+
+  const { rows: userRows } = await pool.query(
+    `SELECT u.id FROM delivery_agents da
+     JOIN users u ON u.phone = da.phone
+     WHERE da.id = $1`,
+    [agent.id],
+  );
+  const userId = userRows[0]?.id || null;
+  if (!userId) return { transactions: [], total: 0, page, pages: 0 };
+
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const safeLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (safePage - 1) * safeLimit;
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(
+      `SELECT id, title, description, amount, type, status, created_at
+       FROM wallet_transactions
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [userId, safeLimit, offset],
+    ),
+    pool.query(
+      `SELECT COUNT(*)::int AS c FROM wallet_transactions WHERE user_id = $1`,
+      [userId],
+    ),
+  ]);
+
+  const total = Number(countRes.rows[0]?.c || 0);
+  return {
+    transactions: rowsRes.rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      description: r.description || '',
+      amountCents: Math.round(Number(r.amount || 0) * 100),
+      type: r.type,
+      status: r.status,
+      createdAt: r.created_at,
+    })),
+    total,
+    page: safePage,
+    pages: Math.max(1, Math.ceil(total / safeLimit)),
+  };
+}
+
 async function getEarnings(rawCode) {
   await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
@@ -1092,6 +1197,8 @@ module.exports = {
   markArrived,
   getDeliveryHistory,
   getEarnings,
+  getWalletTransactions,
   updateAgentLocation,
   processOverdueDeliveries,
+  notifyRidersOfNewOffer,
 };

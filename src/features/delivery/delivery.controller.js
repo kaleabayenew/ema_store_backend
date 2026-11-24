@@ -73,6 +73,18 @@ const getEarnings = async (req, res, next) => {
   }
 };
 
+const getWalletTransactions = async (req, res, next) => {
+  try {
+    const result = await service.getWalletTransactions(agentCode(req), {
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getActiveDeliveries = async (req, res, next) => {
   try {
     const jobs = await service.getActiveDeliveries(agentCode(req));
@@ -135,6 +147,7 @@ module.exports = {
   getActiveDelivery,
   getHistory,
   getEarnings,
+  getWalletTransactions,
   confirmPickup,
   scanDelivery,
   markArrived,

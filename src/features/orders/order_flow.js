@@ -52,6 +52,7 @@ function ensureOrderFlowSchema(db = require('../../core/config/database').pool) 
       await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION`);
       await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION`);
       await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS last_location_at TIMESTAMP WITH TIME ZONE`);
+      await db.query(`ALTER TABLE delivery_agents ADD COLUMN IF NOT EXISTS fcm_token TEXT`);
       await db.query(`ALTER TABLE IF EXISTS partner_profile ADD COLUMN IF NOT EXISTS shop_lat DOUBLE PRECISION`);
       await db.query(`ALTER TABLE IF EXISTS partner_profile ADD COLUMN IF NOT EXISTS shop_lng DOUBLE PRECISION`);
       await db.query(

@@ -42,6 +42,7 @@ router.put('/delivery-fee', adminOnly, feeCtrl.adminUpdateSettings);
 
 // Platform balance ledger (service fees + commissions)
 router.get('/balance', balanceCtrl.getBalance);
+router.get('/balance/breakdown', balanceCtrl.getBalanceBreakdown);
 
 // Partners
 router.get('/partners', partnerCtrl.getAllPartners);

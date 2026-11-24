@@ -28,4 +28,22 @@ const me = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, me };
+const updateFcmToken = async (req, res, next) => {
+  try {
+    const result = await service.updateFcmToken(req.agent.id, req.body?.token);
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const clearFcmToken = async (req, res, next) => {
+  try {
+    const result = await service.clearFcmToken(req.agent.id);
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { register, login, me, updateFcmToken, clearFcmToken };

@@ -38,5 +38,7 @@ const requireAgent = async (req, _res, next) => {
 };
 
 router.get('/me', requireAgent, ctrl.me);
+router.post('/fcm-token', requireAgent, ctrl.updateFcmToken);
+router.delete('/fcm-token', requireAgent, ctrl.clearFcmToken);
 
 module.exports = router;

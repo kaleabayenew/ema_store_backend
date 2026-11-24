@@ -208,4 +208,35 @@ async function me(agentId) {
   return publicAgent(rows[0]);
 }
 
-module.exports = { register, login, me, signAgentToken, ensureAgentAuthSchema, normalizeEtPhone };
+async function updateFcmToken(agentId, rawToken) {
+  await ensureAgentAuthSchema();
+  const token = String(rawToken || '').trim();
+  if (!token || token.length > 4096) {
+    throw new AppError('A valid FCM token is required.', 400, 'INVALID_FCM_TOKEN');
+  }
+  await pool.query(
+    `UPDATE delivery_agents SET fcm_token = $2 WHERE id = $1`,
+    [agentId, token],
+  );
+  return { registered: true };
+}
+
+async function clearFcmToken(agentId) {
+  await ensureAgentAuthSchema();
+  await pool.query(
+    `UPDATE delivery_agents SET fcm_token = NULL WHERE id = $1`,
+    [agentId],
+  );
+  return { registered: false };
+}
+
+module.exports = {
+  register,
+  login,
+  me,
+  updateFcmToken,
+  clearFcmToken,
+  signAgentToken,
+  ensureAgentAuthSchema,
+  normalizeEtPhone,
+};

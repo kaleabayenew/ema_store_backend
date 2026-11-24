@@ -22,6 +22,7 @@ router.get('/active', ctrl.getActiveDeliveries);
 router.get('/active/:orderId', ctrl.getActiveDelivery);
 router.get('/history', ctrl.getHistory);
 router.get('/earnings', ctrl.getEarnings);
+router.get('/wallet-transactions', ctrl.getWalletTransactions);
 router.post('/orders/:orderId/pickup/confirm', ctrl.confirmPickup);
 router.post('/orders/:orderId/deliver/scan', ctrl.scanDelivery);
 router.post('/orders/:orderId/arrived', ctrl.markArrived);
