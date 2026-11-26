@@ -112,6 +112,7 @@ async function autoMigrate() {
       `sku VARCHAR(100)`,
       `stock INTEGER DEFAULT 0`,
       `status VARCHAR(50) DEFAULT 'PENDING'`,
+      `is_active BOOLEAN DEFAULT true`,
       `is_visible BOOLEAN DEFAULT true`,
       `rating_avg DECIMAL(3, 2) DEFAULT 0`,
       `rating_count INTEGER DEFAULT 0`,
