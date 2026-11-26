@@ -14,6 +14,10 @@ class PaymentMethodsService {
         display_order
       FROM payment_methods
       WHERE is_active = true
+        AND LOWER(code) IN (
+          'telebirr', 'cbe', 'cbe_birr', 'awash', 'abyssinia', 'chapa',
+          'balance', 'wallet_balance', 'coins'
+        )
       ORDER BY display_order ASC, name ASC
     `;
 
@@ -41,7 +45,12 @@ class PaymentMethodsService {
         icon_url,
         display_order
       FROM payment_methods
-      WHERE code = $1 AND is_active = true
+      WHERE code = $1
+        AND is_active = true
+        AND LOWER(code) IN (
+          'telebirr', 'cbe', 'cbe_birr', 'awash', 'abyssinia', 'chapa',
+          'balance', 'wallet_balance', 'coins'
+        )
     `;
 
     const result = await pool.query(query, [code]);

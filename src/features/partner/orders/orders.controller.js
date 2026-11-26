@@ -44,19 +44,6 @@ const updateStatus = async (req, res, next) => {
   }
 };
 
-const updatePaymentMethod = async (req, res, next) => {
-  try {
-    const partnerId = req.user.id;
-    const body = req.body || {};
-    const method = body.paymentMethod || body.payment_method;
-    if (!method) return error(res, 'paymentMethod is required.', 400, 'MISSING_FIELDS');
-    const order = await service.updatePaymentMethod(partnerId, req.params.id, method);
-    ok(res, { order });
-  } catch (err) {
-    next(err);
-  }
-};
-
 // Step 1 of "Out from the shop": scanned delivery ID → who + what (no changes).
 const scanHandover = async (req, res, next) => {
   try {
@@ -87,4 +74,4 @@ const confirmHandover = async (req, res, next) => {
   }
 };
 
-module.exports = { getOrders, getOrder, updateStatus, updatePaymentMethod, scanHandover, confirmHandover };
+module.exports = { getOrders, getOrder, updateStatus, scanHandover, confirmHandover };

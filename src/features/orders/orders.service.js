@@ -14,18 +14,26 @@ const {
 
 // ── Create Order from Cart or Direct Items ─────────────────────────────────
 
-async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null, couponCode = null } = {}) {
-  await ensureOrderFlowSchema();
-  // Cash on delivery is disabled — the rider must never hold product money.
-  // All orders must be prepaid (Telebirr/CBE/wallet/coins) so the escrow
-  // payouts always have collected funds behind them.
-  if (/cash|cod/i.test(String(paymentMethod || ''))) {
-    throw new AppError(
-      'Cash on delivery is no longer available. Please pay online before ordering.',
-      400,
-      'COD_DISABLED',
-    );
+const ALLOWED_PAYMENT_METHODS = new Set([
+  'TELEBIRR',
+  'CBE',
+  'CBE BIRR',
+  'BALANCE',
+  'WALLET_BALANCE',
+  'COINS',
+]);
+
+function validatePaymentMethod(paymentMethod) {
+  const normalized = String(paymentMethod || '').trim().toUpperCase();
+  if (!ALLOWED_PAYMENT_METHODS.has(normalized)) {
+    throw new AppError('Invalid payment method', 400, 'INVALID_PAYMENT_METHOD');
   }
+  return normalized;
+}
+
+async function createOrder(userId, shippingAddress, paymentMethod, directItems = null, { deliveryMethod = null, paymentId = null, idempotencyKey = null, couponCode = null } = {}) {
+  const normalizedPaymentMethod = validatePaymentMethod(paymentMethod);
+  await ensureOrderFlowSchema();
 
   // ── Delivery location is mandatory and fully specified ──────────────
   // The customer must provide a complete address AND drop a map pin — the
@@ -224,8 +232,8 @@ async function createOrder(userId, shippingAddress, paymentMethod, directItems =
     // ── Wallet payments: COINS or BALANCE ──────────────────────────────
     // 'COINS'   → every item must have a coin_price; total is in coins.
     // 'BALANCE' → total is the ETB order total charged from users.balance.
-    const walletPayment = paymentMethod === 'COINS' ? 'COINS'
-      : (paymentMethod === 'BALANCE' || paymentMethod === 'WALLET_BALANCE') ? 'BALANCE'
+    const walletPayment = normalizedPaymentMethod === 'COINS' ? 'COINS'
+      : (normalizedPaymentMethod === 'BALANCE' || normalizedPaymentMethod === 'WALLET_BALANCE') ? 'BALANCE'
         : null;
 
     let coinsTotal = 0;
@@ -1304,6 +1312,7 @@ async function getOrderTracking(orderId, userId) {
 
 module.exports = {
   createOrder,
+  validatePaymentMethod,
   getUserOrders,
   getAllOrders,
   updateOrderStatus,

@@ -285,37 +285,6 @@ async function updateStatus(partnerId, orderId, status) {
   return fetchOrder(partnerId, orderId);
 }
 
-/** Partner picks how the customer pays (cash, telebirr, bank, ...). */
-async function updatePaymentMethod(partnerId, orderId, paymentMethod) {
-  await ensureOrderFlowSchema();
-  const method = String(paymentMethod || '').trim();
-  if (!method) {
-    throw new AppError('paymentMethod is required.', 400, 'MISSING_FIELDS');
-  }
-  const client = await pool.connect();
-  let shouldNotifyRiders = false;
-  try {
-    await client.query('BEGIN');
-    const order = await lockPartnerOrder(client, partnerId, orderId);
-    shouldNotifyRiders =
-      !order.delivery_agent_id &&
-      Boolean(getOfferAcceptanceBlock(order)) &&
-      !getOfferAcceptanceBlock({ ...order, payment_method: method });
-    await client.query(
-      `UPDATE orders SET payment_method = $1, updated_at = NOW() WHERE id = $2`,
-      [method.slice(0, 100), orderId],
-    );
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-  if (shouldNotifyRiders) notifyRidersOfNewOffer(orderId);
-  return fetchOrder(partnerId, orderId);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  Hand-over to the delivery person
 // ─────────────────────────────────────────────────────────────────────────────
@@ -476,7 +445,6 @@ module.exports = {
   getOrders,
   getOrder,
   updateStatus,
-  updatePaymentMethod,
   previewHandover,
   confirmHandover,
 };

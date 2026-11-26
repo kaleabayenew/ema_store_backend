@@ -3,7 +3,7 @@ const { AppError } = require('../../../core/errors/app_error');
 
 async function getEarnings(partnerId) {
   // Execute all earnings queries in parallel
-  const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes, commissionRes, settledRes] = await Promise.all([
+  const [totalRes, thisMonthRes, lastMonthRes, pendingRes, chartRes, commissionRes, settledRes, withdrawnRes, refundRes] = await Promise.all([
     // Total revenue from completed/delivered order items
     pool.query(
       `SELECT COALESCE(SUM(
@@ -41,7 +41,7 @@ async function getEarnings(partnerId) {
          AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')`,
       [partnerId],
     ),
-    // Pending payout from wallet — amount is stored as-is (same unit as revenue cents)
+    // Pending payout requests (reserved, not yet paid out)
     pool.query(
       `SELECT COALESCE(SUM(ABS(amount)) * 100, 0)::bigint AS pending
        FROM wallet_transactions
@@ -81,23 +81,46 @@ async function getEarnings(partnerId) {
        WHERE user_id = $1 AND type = 'ORDER_PAYOUT' AND status = 'COMPLETED'`,
       [partnerId],
     ),
+    // Completed withdrawals/payouts already sent out (debits).
+    pool.query(
+      `SELECT COALESCE(SUM(ABS(amount)) * 100, 0)::bigint AS withdrawn
+       FROM wallet_transactions
+       WHERE user_id = $1
+         AND type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST','WITHDRAWAL','PAYOUT')
+         AND status = 'COMPLETED'`,
+      [partnerId],
+    ),
+    // Refund credits into the wallet.
+    pool.query(
+      `SELECT COALESCE(SUM(amount) * 100, 0)::bigint AS refunds
+       FROM wallet_transactions
+       WHERE user_id = $1 AND type = 'REFUND' AND status = 'COMPLETED'`,
+      [partnerId],
+    ),
   ]);
 
   const totalRev = Number(totalRes.rows[0]?.total_revenue ?? 0);
   const pending = Number(pendingRes.rows[0]?.pending ?? 0);
   const commissionCents = Number(commissionRes.rows[0]?.commission ?? 0);
+  const settledCents = Number(settledRes.rows[0]?.settled ?? 0);
+  const withdrawnCents = Number(withdrawnRes.rows[0]?.withdrawn ?? 0);
+  const refundCents = Number(refundRes.rows[0]?.refunds ?? 0);
   let commissionPct = null;
   try {
     const feeSvc = require('../../delivery/delivery_fee.service');
     commissionPct = (await feeSvc.getSettings()).partnerCommissionPct;
   } catch (_) { /* settings table may not exist yet */ }
-  const available = Math.max(0, totalRev - pending);
+  // Wallet balance comes from the ledger, not order revenue: deposits
+  // (ORDER_PAYOUT + REFUND) minus completed withdrawals, minus pending requests.
+  const ledgerCents = settledCents + refundCents - withdrawnCents;
+  const available = Math.max(0, ledgerCents - pending);
 
   return {
     totalRevenueCents: totalRev,
     totalCommissionCents: commissionCents,
     commissionPct,
-    settledPayoutCents: Number(settledRes.rows[0]?.settled ?? 0),
+    settledPayoutCents: settledCents,
+    withdrawnCents,
     thisMonthCents: Number(thisMonthRes.rows[0]?.amount ?? 0),
     lastMonthCents: Number(lastMonthRes.rows[0]?.amount ?? 0),
     pendingPayoutCents: pending,
@@ -125,16 +148,25 @@ async function getTransactions(partnerId, { page = 1, limit = 20 } = {}) {
   return { transactions: rows, total: countRows[0].total, page, limit };
 }
 
-// Available balance in cents = delivered revenue (cents) − pending payouts
-// (wallet_transactions.amount is ETB, so it is converted ×100).
+// Withdrawable balance in cents = wallet ledger truth:
+// (ORDER_PAYOUT + REFUND credits) − completed withdrawals − pending requests.
+// wallet_transactions.amount is stored in ETB, so it is converted ×100.
 async function availableBalanceCents(partnerId) {
-  const [rev, pend] = await Promise.all([
+  const [credits, debits, pend] = await Promise.all([
     pool.query(
-      `SELECT COALESCE(SUM(COALESCE(oi.price_at_order, 0) * oi.quantity - COALESCE(oi.commission_cents, 0)), 0)::bigint AS total
-       FROM order_items oi
-       JOIN products p ON p.id = oi.product_id
-       JOIN orders o ON o.id = oi.order_id
-       WHERE p.partner_id = $1 AND o.status IN ('DELIVERED', 'COMPLETED')`,
+      `SELECT COALESCE(SUM(amount) * 100, 0)::bigint AS total
+       FROM wallet_transactions
+       WHERE user_id = $1
+         AND ((type IN ('ORDER_PAYOUT','REFUND') AND status = 'COMPLETED')
+           OR (type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST','WITHDRAWAL','PAYOUT') AND status = 'COMPLETED' AND amount < 0))`,
+      [partnerId],
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(ABS(amount)) * 100, 0)::bigint AS total
+       FROM wallet_transactions
+       WHERE user_id = $1
+         AND type IN ('PAYOUT_REQUEST','TRANSFER_REQUEST','WITHDRAWAL','PAYOUT')
+         AND status = 'COMPLETED' AND amount >= 0`,
       [partnerId],
     ),
     pool.query(
@@ -144,10 +176,10 @@ async function availableBalanceCents(partnerId) {
       [partnerId],
     ),
   ]);
-  return Math.max(
-    0,
-    Number(rev.rows[0]?.total ?? 0) - Number(pend.rows[0]?.pending ?? 0),
-  );
+  const creditsCents = Number(credits.rows[0]?.total ?? 0);
+  const debitsCents = Number(debits.rows[0]?.total ?? 0);
+  const pendingCents = Number(pend.rows[0]?.pending ?? 0);
+  return Math.max(0, creditsCents - debitsCents - pendingCents);
 }
 
 async function requestPayout(partnerId, amount, details = {}) {
