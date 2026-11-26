@@ -38,7 +38,7 @@ const errorHandler = (err, req, res, _next) => {
 
   // Any other Postgres error — never leak err.message / err.detail
   if (isPgError(err.code)) {
-    console.error('[error] pg', { code: err.code, path: req?.path, method: req?.method });
+    console.error('[error] pg', { code: err.code, message: err.message, detail: err.detail, path: req?.path, method: req?.method });
     return fail(res, 500, 'INTERNAL_ERROR', 'Something went wrong.', req);
   }
 
