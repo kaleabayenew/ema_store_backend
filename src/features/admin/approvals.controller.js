@@ -20,16 +20,13 @@ const getApprovals = async (req, res, next) => {
 
     const products = await pool.query(`
       SELECT p.id,
-             COALESCE(p.name_en, p.name, 'Product') AS name_en,
-             COALESCE(p.description_en, p.description, '') AS description_en,
-             COALESCE(p.price_cents, CAST(p.price * 100 AS INTEGER), 0) AS price_cents,
-             COALESCE(p.stock, p.stock_quantity, 0) AS stock,
+             COALESCE(p.name_en, 'Product') AS name_en,
+             COALESCE(p.description_en, '') AS description_en,
+             COALESCE(p.price_cents, 0) AS price_cents,
+             COALESCE(p.stock, 0) AS stock,
              p.status,
              COALESCE(c.name_en, p.category, 'General') AS category,
-             COALESCE(
-               p.image_url,
-               (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_primary DESC, sort_order ASC, created_at ASC LIMIT 1)
-             ) AS image_url,
+             (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_primary DESC, sort_order ASC, created_at ASC LIMIT 1) AS image_url,
              p.created_at,
              COALESCE(pp.shop_name, pp.business_name, pp.owner_name, u.full_name, 'Partner') AS partner_name,
              COALESCE(pp.owner_name, u.full_name, '—') AS partner_owner,
