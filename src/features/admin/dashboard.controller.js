@@ -1,8 +1,11 @@
 const { ok } = require('../../core/utils/response');
 const { pool } = require('../../core/config/database');
+const { ensureOrderFlowSchema } = require('../orders/order_flow');
 
 async function getDashboard(req, res, next) {
   try {
+    await ensureOrderFlowSchema();
+
     // ── KPI summary ───────────────────────────────────────────────────────────
     const kpiRes = await pool.query(`
       SELECT
