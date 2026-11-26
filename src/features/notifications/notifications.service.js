@@ -134,7 +134,7 @@ async function updateFcmToken(userId, fcmToken) {
 
 async function getUserNotifications(userId, { limit = 20, offset = 0 } = {}) {
   const { rows } = await pool.query(
-    `SELECT id, title, body, data, is_read, created_at
+    `SELECT id, title, body, type, data, is_read, created_at
      FROM notifications
      WHERE user_id = $1
      ORDER BY created_at DESC
