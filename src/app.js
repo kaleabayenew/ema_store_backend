@@ -520,6 +520,8 @@ async function autoMigrate() {
         description TEXT,
         address TEXT,
         city VARCHAR(100),
+        shop_lat DOUBLE PRECISION,
+        shop_lng DOUBLE PRECISION,
         rating_avg DECIMAL(3, 2) DEFAULT 0,
         rating_count INTEGER DEFAULT 0,
         total_orders INTEGER DEFAULT 0,
@@ -540,6 +542,8 @@ async function autoMigrate() {
         `address TEXT`,
         `phone VARCHAR(20)`,
         `email VARCHAR(255)`,
+        `shop_lat DOUBLE PRECISION`,
+        `shop_lng DOUBLE PRECISION`,
         `logo_url TEXT`,
         `description TEXT`,
         `rating_avg DECIMAL(3, 2) DEFAULT 0`,
@@ -972,6 +976,33 @@ async function autoMigrate() {
       console.log('[Migration] ⚠ Support default messages table:', e.message);
     }
 
+    // Create contact_settings table (single 'default' row — contact channels)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS contact_settings (
+          id VARCHAR(50) PRIMARY KEY DEFAULT 'default',
+          hotline_phone VARCHAR(50) DEFAULT '',
+          sos_phone VARCHAR(50) DEFAULT '',
+          telegram VARCHAR(100) DEFAULT '',
+          whatsapp VARCHAR(50) DEFAULT '',
+          facebook VARCHAR(200) DEFAULT '',
+          instagram VARCHAR(200) DEFAULT '',
+          email VARCHAR(200) DEFAULT '',
+          website VARCHAR(200) DEFAULT '',
+          address TEXT DEFAULT '',
+          working_hours VARCHAR(200) DEFAULT '',
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        INSERT INTO contact_settings (id) VALUES ('default')
+        ON CONFLICT (id) DO NOTHING
+      `);
+      console.log('[Migration] ✓ Contact settings table');
+    } catch (e) {
+      console.log('[Migration] ⚠ Contact settings table:', e.message);
+    }
+
     // Create coupons table
     try {
       await pool.query(`
@@ -1312,6 +1343,7 @@ const adminUsersRouter = require('./features/users/users.router');
 const adminAnnouncementsRouter = require('./features/announcements/announcements.router');
 const bidsRouter = require('./features/bids/bids.router');
 const supportRouter = require('./features/support/support.router');
+const contactRouter = require('./features/contact/contact.router');
 const bannersRouter = require('./features/banners/banners.router');
 const cartRouter = require('./features/cart/cart.router');
 const ordersRouter = require('./features/orders/orders.router');
@@ -1455,6 +1487,7 @@ app.use('/api/v1/admin', adminUsersRouter);
 app.use('/api/v1/admin', adminAnnouncementsRouter);
 app.use('/api/v1/bids', bidsRouter);
 app.use('/api/v1/support', supportRouter);
+app.use('/api/v1/contact', contactRouter);
 app.use('/api/v1/banners', bannersRouter);
 app.use('/api/v1/cart', cartRouter);
 app.use('/api/v1/orders', ordersRouter);
@@ -1557,6 +1590,19 @@ setInterval(() => {
 setTimeout(() => {
   processOverdueDeliveries().catch((err) =>
     console.error('[delivery] overdue startup sweep failed:', err.message || err.code || err),
+  );
+}, 20 * 1000).unref();
+
+// ── Auction reminders and final results: process at startup and every 60s ────
+const { processBidNotifications } = require('./features/bids/bids.scheduler');
+setInterval(() => {
+  processBidNotifications().catch((err) =>
+    console.error('[bids] notification scheduler failed:', err.message || err.code || err),
+  );
+}, 60 * 1000).unref();
+setTimeout(() => {
+  processBidNotifications().catch((err) =>
+    console.error('[bids] notification startup sweep failed:', err.message || err.code || err),
   );
 }, 20 * 1000).unref();
 
