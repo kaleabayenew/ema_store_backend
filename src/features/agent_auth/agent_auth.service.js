@@ -50,12 +50,36 @@ function ensureAgentAuthSchema(db = pool) {
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_agents_national_id
          ON delivery_agents(national_id) WHERE national_id IS NOT NULL`,
       );
+      await backfillAgentUsers(db);
     })().catch((err) => {
       schemaPromise = null;
       throw err;
     });
   }
   return schemaPromise;
+}
+
+/**
+ * Riders registered via /agent-auth live only in delivery_agents, but the
+ * notifications inbox, wallet payouts and earnings all join through a
+ * `users` row on phone. Create a minimal RIDER user for every agent that
+ * lacks one so those features work. Idempotent — safe on every boot.
+ */
+async function backfillAgentUsers(db = pool) {
+  const { rows: agents } = await db.query(
+    `SELECT id, phone, full_name FROM delivery_agents WHERE phone IS NOT NULL`,
+  );
+  for (const a of agents) {
+    const canonical = normalizeEtPhone(a.phone) || a.phone;
+    const variants = phoneVariants(canonical);
+    await db.query(
+      `INSERT INTO users (phone, full_name, role, is_active, is_verified)
+       SELECT $1, $2, 'RIDER', true, true
+       WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.phone = ANY($3))
+       ON CONFLICT (phone) DO NOTHING`,
+      [a.phone, a.full_name, variants],
+    );
+  }
 }
 
 function generateAgentCode() {
@@ -180,6 +204,9 @@ async function register(body = {}) {
     }
   }
   if (!agent) throw new AppError('Could not generate a unique agent code. Try again.', 500, 'CODE_GENERATION_FAILED');
+
+  // Link a users row so notifications, wallet payouts and earnings resolve.
+  backfillAgentUsers().catch(() => {});
 
   return {
     token: signAgentToken(agent),
@@ -407,6 +434,8 @@ async function reviewProfileRequest(requestId, { approve, note } = {}) {
       [requestId, newStatus, note ? String(note).slice(0, 500) : null],
     );
     await client.query('COMMIT');
+    // Notify the rider's linked user account — never block the review on this.
+    notifyProfileReview(req.agent_id, newStatus, note, requestId).catch(() => {});
     return formatRequest(updated[0]);
   } catch (e) {
     await client.query('ROLLBACK');
@@ -414,6 +443,30 @@ async function reviewProfileRequest(requestId, { approve, note } = {}) {
   } finally {
     client.release();
   }
+}
+
+/** Inserts an inbox notification for the rider's linked user account. */
+async function notifyProfileReview(agentId, status, note, requestId) {
+  const approved = status === 'APPROVED';
+  const title = approved
+    ? 'Profile update approved'
+    : 'Profile update rejected';
+  const body = approved
+    ? 'Your profile changes were approved and are now live.'
+    : `Your profile change request was rejected.${note ? ` Reason: ${note}` : ''}`;
+  await pool.query(
+    `INSERT INTO notifications (user_id, title, body, data, type)
+     SELECT u.id, $2, $3, $4::jsonb, 'PROFILE_REQUEST'
+     FROM delivery_agents da
+     JOIN users u ON u.phone = da.phone
+     WHERE da.id = $1`,
+    [
+      agentId,
+      title,
+      body,
+      JSON.stringify({ requestId, status }),
+    ],
+  );
 }
 
 module.exports = {
