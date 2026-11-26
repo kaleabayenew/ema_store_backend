@@ -160,6 +160,8 @@ async function autoMigrate() {
     console.log('[Migration] ✓ Product images table');
     try {
       await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`);
+      await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS is_primary BOOLEAN DEFAULT false`);
+      await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
     } catch (e) { }
 
     // Create product_variants table
@@ -552,6 +554,8 @@ async function autoMigrate() {
         `total_sales DECIMAL(12, 2) DEFAULT 0`,
         `is_verified BOOLEAN DEFAULT false`,
         `is_active BOOLEAN DEFAULT true`,
+        `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+        `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
       ];
       for (const colDef of partnerCols) {
         await pool.query(`ALTER TABLE partner_profile ADD COLUMN IF NOT EXISTS ${colDef}`);
