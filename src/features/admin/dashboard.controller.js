@@ -1,16 +1,22 @@
 const { ok } = require('../../core/utils/response');
-const { Pool } = require('pg');
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const { pool } = require('../../core/config/database');
 
 async function getDashboard(req, res, next) {
   try {
     // ── KPI summary ───────────────────────────────────────────────────────────
     const kpiRes = await pool.query(`
       SELECT
-        COALESCE(SUM(total_amount), 0)::numeric                                AS revenue_total,
-        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN total_amount END), 0)::numeric AS revenue_30d,
-        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days' THEN total_amount END), 0)::numeric AS revenue_prev_30d,
+        COALESCE(SUM(total_amount) FILTER (
+          WHERE payment_status = 'PAID'
+            AND status <> 'REFUNDED'
+            AND created_at >= NOW() - INTERVAL '30 days'
+        ), 0)::numeric AS revenue_30d,
+        COALESCE(SUM(total_amount) FILTER (
+          WHERE payment_status = 'PAID'
+            AND status <> 'REFUNDED'
+            AND created_at >= NOW() - INTERVAL '60 days'
+            AND created_at < NOW() - INTERVAL '30 days'
+        ), 0)::numeric AS revenue_prev_30d,
         COUNT(*)::int                                                          AS orders_total,
         COUNT(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN 1 END)::int AS orders_30d,
         COUNT(CASE WHEN created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days' THEN 1 END)::int AS orders_prev_30d
@@ -39,15 +45,33 @@ async function getDashboard(req, res, next) {
 
     // ── Monthly sales chart (last 12 months) ──────────────────────────────────
     const salesRes = await pool.query(`
+      WITH months AS (
+        SELECT generate_series(
+          DATE_TRUNC('month', NOW()::timestamp) - INTERVAL '11 months',
+          DATE_TRUNC('month', NOW()::timestamp),
+          INTERVAL '1 month'
+        ) AS month_date
+      ),
+      monthly_orders AS (
+        SELECT
+          DATE_TRUNC('month', created_at) AS month_date,
+          COALESCE(SUM(total_amount) FILTER (
+            WHERE payment_status = 'PAID' AND status <> 'REFUNDED'
+          ), 0)::numeric AS revenue,
+          COUNT(*)::int AS order_count
+        FROM orders
+        WHERE created_at >= DATE_TRUNC('month', NOW()::timestamp) - INTERVAL '11 months'
+          AND created_at < DATE_TRUNC('month', NOW()::timestamp) + INTERVAL '1 month'
+        GROUP BY DATE_TRUNC('month', created_at)
+      )
       SELECT
-        TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS month,
-        DATE_TRUNC('month', created_at) AS month_date,
-        COALESCE(SUM(total_amount), 0)::numeric AS revenue,
-        COUNT(*)::int AS order_count
-      FROM orders
-      WHERE created_at >= NOW() - INTERVAL '12 months'
-      GROUP BY DATE_TRUNC('month', created_at)
-      ORDER BY month_date ASC
+        TO_CHAR(months.month_date, 'Mon') AS month,
+        months.month_date,
+        COALESCE(monthly_orders.revenue, 0)::numeric AS revenue,
+        COALESCE(monthly_orders.order_count, 0)::int AS order_count
+      FROM months
+      LEFT JOIN monthly_orders USING (month_date)
+      ORDER BY months.month_date ASC
     `);
 
     // ── Order status mix ──────────────────────────────────────────────────────
@@ -58,33 +82,47 @@ async function getDashboard(req, res, next) {
       ORDER BY count DESC
     `);
 
-    // ── Orders by city (from shipping_address pattern) ────────────────────────
-    // Use a simple word-frequency approach on shipping_address
+    // Addresses use "area, city (Pin: ...)" format; group by their first segment.
     const cityRes = await pool.query(`
       SELECT
-        shipping_address AS city,
+        NULLIF(TRIM(SPLIT_PART(shipping_address, ',', 1)), '') AS area,
         COUNT(*)::int AS orders
       FROM orders
       WHERE shipping_address IS NOT NULL AND shipping_address != ''
-      GROUP BY shipping_address
+      GROUP BY NULLIF(TRIM(SPLIT_PART(shipping_address, ',', 1)), '')
       ORDER BY orders DESC
       LIMIT 6
     `);
 
     // ── Top products ──────────────────────────────────────────────────────────
     const topProductsRes = await pool.query(`
-      SELECT p.name_en AS name, p.sold_count AS sold
-      FROM products p
-      WHERE p.status = 'APPROVED'
-      ORDER BY p.sold_count DESC
+      SELECT COALESCE(NULLIF(p.name_en, ''), p.name) AS name,
+             SUM(oi.quantity)::int AS sold
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN products p ON p.id = oi.product_id
+      WHERE o.payment_status = 'PAID' AND o.status <> 'REFUNDED'
+      GROUP BY p.id, p.name_en, p.name
+      ORDER BY sold DESC
       LIMIT 5
     `);
 
     // ── Top partners ──────────────────────────────────────────────────────────
     const topPartnersRes = await pool.query(`
-      SELECT pp.business_name AS name, pp.total_sales AS sales
+      SELECT COALESCE(
+               NULLIF(pp.business_name, ''),
+               NULLIF(pp.shop_name, ''),
+               pp.owner_name,
+               'Partner'
+             ) AS name,
+             (SUM(oi.price_at_order * oi.quantity) / 100.0)::numeric AS sales
       FROM partner_profile pp
-      ORDER BY pp.total_sales DESC NULLS LAST
+      JOIN products p ON p.partner_id = pp.user_id
+      JOIN order_items oi ON oi.product_id = p.id
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.payment_status = 'PAID' AND o.status <> 'REFUNDED'
+      GROUP BY pp.id, pp.business_name, pp.shop_name, pp.owner_name
+      ORDER BY sales DESC
       LIMIT 5
     `);
 
@@ -142,7 +180,7 @@ async function getDashboard(req, res, next) {
         orders:  r.order_count,
       })),
       orderMix:     statusRes.rows.map((r) => ({ name: r.status, value: r.count })),
-      cityData:     cityRes.rows.map((r) => ({ city: r.city, orders: r.orders })),
+      cityData:     cityRes.rows.map((r) => ({ area: r.area || 'Unknown', orders: r.orders })),
       topProducts:  topProductsRes.rows.map((r) => ({ name: r.name, sold: r.sold || 0 })),
       topPartners:  topPartnersRes.rows.map((r) => ({ name: r.name, sales: parseFloat(r.sales) || 0 })),
       recentOrders: recentOrdersRes.rows.map((r) => ({

@@ -37,6 +37,24 @@ const updateFcmToken = async (req, res, next) => {
   }
 };
 
+const submitProfileRequest = async (req, res, next) => {
+  try {
+    const result = await service.submitProfileRequest(req.agent.id, req.body || {});
+    ok(res, { request: result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getProfileRequest = async (req, res, next) => {
+  try {
+    const request = await service.getProfileRequest(req.agent.id);
+    ok(res, { request });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const clearFcmToken = async (req, res, next) => {
   try {
     const result = await service.clearFcmToken(req.agent.id);
@@ -46,4 +64,4 @@ const clearFcmToken = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, me, updateFcmToken, clearFcmToken };
+module.exports = { register, login, me, updateFcmToken, clearFcmToken, submitProfileRequest, getProfileRequest };

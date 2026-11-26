@@ -33,7 +33,7 @@ const listAgents = async (req, res, next) => {
               a.last_lat, a.last_lng, a.last_location_at,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL)::int AS completed_deliveries,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NULL
-                                   AND o.status IN ('CONFIRMED','PACKED','SHIPPED'))::int AS active_deliveries,
+                                   AND o.status IN ('CONFIRMED','PROCESSING','PACKED','SHIPPED','IN_TRANSIT'))::int AS active_deliveries,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL
                                    AND o.delivered_at::date = CURRENT_DATE)::int AS deliveries_today,
               MAX(o.delivered_at) AS last_delivery_at
@@ -178,7 +178,7 @@ const getAgent = async (req, res, next) => {
     const { rows: statRows } = await pool.query(
       `SELECT COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL)::int AS completed_deliveries,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NULL
-                                   AND o.status IN ('CONFIRMED','PACKED','SHIPPED'))::int AS active_deliveries,
+                                   AND o.status IN ('CONFIRMED','PROCESSING','PACKED','SHIPPED','IN_TRANSIT'))::int AS active_deliveries,
               COUNT(o.id) FILTER (WHERE o.delivered_at IS NOT NULL
                                    AND o.delivered_at::date = CURRENT_DATE)::int AS deliveries_today,
               MAX(o.delivered_at) AS last_delivery_at
@@ -216,6 +216,84 @@ const getAgent = async (req, res, next) => {
         deliveriesToday: s.deliveries_today || 0,
         lastDeliveryAt: s.last_delivery_at,
       },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── GET /api/v1/admin/agents/:id/deliveries
+// Lists a rider's live deliveries or completed/cancelled delivery history.
+const getAgentDeliveries = async (req, res, next) => {
+  try {
+    await ensureOrderFlowSchema();
+    const type = String(req.query.type || 'active').toLowerCase();
+    if (!['active', 'history'].includes(type)) {
+      throw new AppError('Delivery type must be active or history.', 400, 'INVALID_DELIVERY_TYPE');
+    }
+
+    const requestedPage = Number.parseInt(req.query.page, 10);
+    const requestedLimit = Number.parseInt(req.query.limit, 10);
+    const page = Math.max(1, Number.isInteger(requestedPage) ? requestedPage : 1);
+    const limit = Math.min(100, Math.max(1, Number.isInteger(requestedLimit) ? requestedLimit : 10));
+    const offset = (page - 1) * limit;
+    const deliveryFilter = type === 'active'
+      ? `o.delivered_at IS NULL
+         AND o.status IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'IN_TRANSIT')`
+      : `(o.delivered_at IS NOT NULL OR o.status IN ('DELIVERED', 'CANCELLED'))`;
+
+    const { rows: agentRows } = await pool.query(
+      'SELECT id, agent_code, full_name FROM delivery_agents WHERE id = $1',
+      [req.params.id],
+    );
+    const agent = agentRows[0];
+    if (!agent) throw new AppError('Agent not found.', 404, 'AGENT_NOT_FOUND');
+
+    const [countResult, deliveriesResult] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS total
+         FROM orders o
+         WHERE o.delivery_agent_id = $1 AND ${deliveryFilter}`,
+        [agent.id],
+      ),
+      pool.query(
+        `SELECT o.id, o.delivery_code, o.status, o.total_amount,
+                o.shipping_address, o.payment_status, o.created_at,
+                o.delivered_at,
+                COALESCE(NULLIF(cu.full_name, ''), NULLIF(u.full_name, ''), u.phone, 'Customer') AS customer_name,
+                COUNT(oi.id)::int AS item_count
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+         LEFT JOIN customer_user cu ON cu.user_id = o.user_id
+         LEFT JOIN order_items oi ON oi.order_id = o.id
+         WHERE o.delivery_agent_id = $1 AND ${deliveryFilter}
+         GROUP BY o.id, cu.full_name, u.full_name, u.phone
+         ORDER BY COALESCE(o.delivered_at, o.updated_at, o.created_at) DESC
+         LIMIT $2 OFFSET $3`,
+        [agent.id, limit, offset],
+      ),
+    ]);
+
+    const total = countResult.rows[0]?.total ?? 0;
+    ok(res, {
+      agent: { id: agent.id, agentCode: agent.agent_code, fullName: agent.full_name },
+      type,
+      deliveries: deliveriesResult.rows.map((row) => ({
+        id: row.id,
+        orderNumber: row.delivery_code || String(row.id).slice(0, 8).toUpperCase(),
+        status: row.status,
+        totalAmount: Number(row.total_amount) || 0,
+        shippingAddress: row.shipping_address || '—',
+        paymentStatus: row.payment_status || 'PENDING',
+        customerName: row.customer_name || 'Customer',
+        itemCount: Number(row.item_count) || 0,
+        createdAt: row.created_at,
+        deliveredAt: row.delivered_at,
+      })),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
     });
   } catch (err) {
     next(err);
@@ -261,4 +339,43 @@ const resetAgentPassword = async (req, res, next) => {
   }
 };
 
-module.exports = { listAgents, createAgent, setAgentStatus, getAgent, resetAgentPassword };
+// ── Rider profile change requests ────────────────────────────────────────────
+
+const agentAuthService = require('../agent_auth/agent_auth.service');
+
+// GET /api/v1/admin/agents/profile-requests?status=PENDING
+const listProfileRequests = async (req, res, next) => {
+  try {
+    const requests = await agentAuthService.listProfileRequests({
+      status: req.query.status || 'PENDING',
+      limit: req.query.limit,
+    });
+    ok(res, { requests });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/v1/admin/agents/profile-requests/:id/review  { approve, note? }
+const reviewProfileRequest = async (req, res, next) => {
+  try {
+    const result = await agentAuthService.reviewProfileRequest(
+      req.params.id,
+      { approve: req.body?.approve === true, note: req.body?.note },
+    );
+    ok(res, { request: result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  listAgents,
+  createAgent,
+  setAgentStatus,
+  getAgent,
+  getAgentDeliveries,
+  resetAgentPassword,
+  listProfileRequests,
+  reviewProfileRequest,
+};

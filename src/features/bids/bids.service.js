@@ -198,6 +198,8 @@ function _format(r, viewerId = null, isStaff = false) {
     out.winnerUserId = winnerId;
     out.winner_amount = winnerAmount;
     out.winnerAmount = winnerAmount;
+    out.winner_name = r.winner_name ?? null;
+    out.winnerName = out.winner_name;
     out.unique_bids = r.unique_bids ?? 0;
     out.uniqueBids = out.unique_bids;
     out.total_collected = parseFloat(r.total_collected) || 0;
@@ -241,7 +243,17 @@ const BID_SELECT = `
       FROM bid_entries be2
       WHERE be2.bid_id = b.id
         AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
-    ) AS unique_bids
+    ) AS unique_bids,
+    (
+      SELECT COALESCE(cu.full_name, u.phone)
+      FROM bid_entries be2
+      LEFT JOIN users u ON u.id = be2.user_id
+      LEFT JOIN customer_user cu ON cu.user_id = be2.user_id
+      WHERE be2.bid_id = b.id
+        AND (SELECT COUNT(*) FROM bid_entries be3 WHERE be3.bid_id = b.id AND be3.amount = be2.amount) = 1
+      ORDER BY be2.amount ASC, be2.placed_at ASC
+      LIMIT 1
+    ) AS winner_name
   FROM bids b
   LEFT JOIN products p  ON p.id = b.product_id
   LEFT JOIN product_images pi ON pi.product_id = b.product_id AND pi.is_primary = true

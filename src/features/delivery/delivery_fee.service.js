@@ -454,4 +454,6 @@ module.exports = {
   computeCommissions,
   serviceFeeForLegs,
   resolveItemsForFee,
+  zoneLookup,
+  ZONES,
 };

@@ -41,6 +41,19 @@ async function applyFeeBackfill(job) {
   }
 }
 
+let issueSchemaPromise = null;
+/** Columns for rider-reported delivery problems (overdue handling). */
+function ensureDeliveryIssueSchema(db = pool) {
+  if (!issueSchemaPromise) {
+    issueSchemaPromise = (async () => {
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_issue_reason TEXT`);
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_issue_reported_at TIMESTAMP WITH TIME ZONE`);
+      await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_issue_resolved BOOLEAN NOT NULL DEFAULT FALSE`);
+    })().catch((e) => { issueSchemaPromise = null; throw e; });
+  }
+  return issueSchemaPromise;
+}
+
 async function findAgent(code) {
   const normalized = normalizeAgentCode(code);
   if (!normalized) {
@@ -485,6 +498,7 @@ async function declineOffer(rawCode, orderId) {
  */
 async function getActiveJobs(rawCode, orderId = null) {
   await ensureOrderFlowSchema();
+  await ensureDeliveryIssueSchema();
   if (!orderId) await notifyOverdueDeliveries();
   // Unknown/inactive agent codes must not 401 here — the rider app polls
   // this endpoint before listing offers, and a failure would hide the whole
@@ -505,6 +519,7 @@ async function getActiveJobs(rawCode, orderId = null) {
             o.delivery_requested_at, o.rider_arrived_at, o.delivery_proof, o.delivered_at,
             o.customer_accepted_at, o.customer_rejected_at, o.payment_status,
             o.delivery_fee_cents, o.rider_commission_cents,
+            o.delivery_issue_reason, o.delivery_issue_reported_at,
             u.full_name AS customer_name, u.phone AS customer_phone,
             COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
             COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address, shop.phone AS shop_phone
@@ -569,6 +584,8 @@ async function getActiveJobs(rawCode, orderId = null) {
       deliveryAcceptedAt: r.delivery_accepted_at,
       deliveryDeadlineAt: r.delivery_deadline_at,
       isOverdue: r.is_overdue === true,
+      issueReason: r.delivery_issue_reason || null,
+      issueReportedAt: r.delivery_issue_reported_at || null,
       handoverRequestedAt: r.handover_requested_at,
       handoverProof: r.handover_proof,
       handedOverAt: r.handed_over_at,
@@ -812,12 +829,44 @@ async function scanDelivery(rawCode, orderId, { customerQrToken, proof = [] }) {
  * (delivered, or cancelled after hand-over). Powers the rider app's
  * "My Orders" history tab.
  */
-async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
+async function getDeliveryHistory(
+  rawCode,
+  { limit = 50, page = 1, from = null, to = null, status = null } = {},
+) {
   await ensureOrderFlowSchema();
   const agent = await findAgent(rawCode);
   const max = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const offset = (safePage - 1) * max;
 
-  const { rows } = await pool.query(
+  // Optional filters: delivered_at range (falls back to created_at for
+  // orders delivered before the timestamp column existed) + status.
+  const conditions = [
+    `o.delivery_agent_id = $1`,
+    `(o.delivered_at IS NOT NULL OR o.status IN ('DELIVERED', 'CANCELLED'))`,
+  ];
+  const params = [agent.id];
+  if (from) {
+    params.push(from);
+    conditions.push(`COALESCE(o.delivered_at, o.updated_at, o.created_at) >= $${params.length}`);
+  }
+  if (to) {
+    params.push(to);
+    conditions.push(`COALESCE(o.delivered_at, o.updated_at, o.created_at) <= $${params.length}`);
+  }
+  const statusFilter = `${status || ''}`.toUpperCase();
+  if (['DELIVERED', 'CANCELLED'].includes(statusFilter)) {
+    params.push(statusFilter);
+    conditions.push(`o.status = $${params.length}`);
+  }
+  const where = conditions.join(' AND ');
+
+  const [countRes, rowsRes] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(*)::int AS c FROM orders o WHERE ${where}`,
+      params,
+    ),
+    pool.query(
     `SELECT o.id, o.total_amount, o.total_cents, o.payment_method, o.shipping_address,
             o.delivery_code, o.status, o.created_at, o.updated_at,
             o.delivery_fee_cents, o.rider_commission_cents,
@@ -835,12 +884,14 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
        LIMIT 1
      ) sp ON true
      LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
-     WHERE o.delivery_agent_id = $1
-       AND (o.delivered_at IS NOT NULL OR o.status IN ('DELIVERED', 'CANCELLED'))
+     WHERE ${where}
      ORDER BY COALESCE(o.delivered_at, o.updated_at, o.created_at) DESC
-     LIMIT $2`,
-    [agent.id, max],
-  );
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, max, offset],
+    ),
+  ]);
+  const rows = rowsRes.rows;
+  const total = Number(countRes.rows[0]?.c || 0);
 
   const orderIds = rows.map((r) => r.id);
   const itemsByOrder = {};
@@ -873,6 +924,9 @@ async function getDeliveryHistory(rawCode, { limit = 50 } = {}) {
 
   return {
     agent: { code: agent.agent_code, name: agent.full_name },
+    total,
+    page: safePage,
+    pages: Math.max(1, Math.ceil(total / max)),
     history: rows.map((r) => ({
       id: r.id,
       orderNumber: r.delivery_code || String(r.id).slice(0, 8).toUpperCase(),
@@ -1013,13 +1067,7 @@ async function getWalletTransactions(rawCode, { page = 1, limit = 20 } = {}) {
   }
   if (!agent) return { transactions: [], total: 0, page, pages: 0 };
 
-  const { rows: userRows } = await pool.query(
-    `SELECT u.id FROM delivery_agents da
-     JOIN users u ON u.phone = da.phone
-     WHERE da.id = $1`,
-    [agent.id],
-  );
-  const userId = userRows[0]?.id || null;
+  const userId = await agentUserId(agent);
   if (!userId) return { transactions: [], total: 0, page, pages: 0 };
 
   const safePage = Math.max(1, parseInt(page, 10) || 1);
@@ -1055,6 +1103,171 @@ async function getWalletTransactions(rawCode, { page = 1, limit = 20 } = {}) {
     total,
     page: safePage,
     pages: Math.max(1, Math.ceil(total / safeLimit)),
+  };
+}
+
+/** Resolve the rider's user account via the phone join (same as payouts). */
+async function agentUserId(agent) {
+  const { rows } = await pool.query(
+    `SELECT u.id FROM delivery_agents da
+     JOIN users u ON u.phone = da.phone
+     WHERE da.id = $1`,
+    [agent.id],
+  );
+  return rows[0]?.id || null;
+}
+
+/**
+ * Notification inbox for the rider's linked user account.
+ * Returns newest-first rows; empty when the agent has no user account.
+ */
+async function getNotifications(rawCode, { limit = 30 } = {}) {
+  await ensureOrderFlowSchema();
+  let agent = null;
+  try {
+    agent = await findAgent(rawCode);
+  } catch (_) {
+    agent = null;
+  }
+  if (!agent) return { notifications: [], unread: 0 };
+
+  const userId = await agentUserId(agent);
+  if (!userId) return { notifications: [], unread: 0 };
+
+  const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 30));
+  const [rowsRes, unreadRes] = await Promise.all([
+    pool.query(
+      `SELECT id, title, body, data, is_read, created_at
+       FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [userId, safeLimit],
+    ),
+    pool.query(
+      `SELECT COUNT(*)::int AS c FROM notifications
+       WHERE user_id = $1 AND is_read = false`,
+      [userId],
+    ),
+  ]);
+
+  return {
+    notifications: rowsRes.rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      body: r.body || '',
+      data: r.data || {},
+      isRead: !!r.is_read,
+      createdAt: r.created_at,
+    })),
+    unread: Number(unreadRes.rows[0]?.c || 0),
+  };
+}
+
+/** Mark every notification read for the rider's linked user account. */
+async function markNotificationsRead(rawCode) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+  const userId = await agentUserId(agent);
+  if (!userId) return { marked: 0 };
+  const { rowCount } = await pool.query(
+    `UPDATE notifications SET is_read = true
+     WHERE user_id = $1 AND is_read = false`,
+    [userId],
+  );
+  return { marked: rowCount || 0 };
+}
+
+/**
+ * Delivery heatmap: aggregates delivered orders by Addis Ababa zone
+ * (keyword match on the shipping address, same lookup the fee engine uses).
+ * Returns per-zone order counts, revenue and distinct partner shops, plus
+ * the top partner shops overall — powers the rider heatmap screen.
+ */
+async function getDeliveryZones(rawCode, { days = 90 } = {}) {
+  await ensureOrderFlowSchema();
+  const agent = await findAgent(rawCode);
+  const safeDays = Math.min(365, Math.max(1, parseInt(days, 10) || 90));
+
+  const { zoneLookup } = require('./delivery_fee.service');
+
+  const { rows } = await pool.query(
+    `SELECT o.shipping_address,
+            COALESCE(o.total_cents, ROUND(o.total_amount * 100)::int) AS total_cents,
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name
+     FROM orders o
+     LEFT JOIN LATERAL (
+       SELECT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = o.id
+       LIMIT 1
+     ) sp ON true
+     LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+     WHERE o.delivered_at IS NOT NULL
+       AND o.delivered_at >= NOW() - ($1 || ' days')::interval`,
+    [String(safeDays)],
+  );
+
+  const zones = new Map();
+  const partners = new Map();
+  const bump = (map, key, fn) => {
+    if (!map.has(key)) map.set(key, fn());
+    return map.get(key);
+  };
+
+  for (const r of rows) {
+    const z = zoneLookup(r.shipping_address);
+    const zoneName = z ? z.keys[0] : 'other';
+    const revenue = Number(r.total_cents) || 0;
+    const entry = bump(zones, zoneName, () => ({
+      name: zoneName === 'other' ? 'Other areas' : zoneName,
+      lat: z ? z.lat : null,
+      lng: z ? z.lng : null,
+      orders: 0,
+      revenueCents: 0,
+      partnerNames: new Set(),
+    }));
+    entry.orders += 1;
+    entry.revenueCents += revenue;
+    if (r.shop_name) entry.partnerNames.add(r.shop_name);
+
+    if (r.shop_name) {
+      const p = bump(partners, r.shop_name, () => ({
+        shopName: r.shop_name,
+        orders: 0,
+        revenueCents: 0,
+      }));
+      p.orders += 1;
+      p.revenueCents += revenue;
+    }
+  }
+
+  const zoneList = [...zones.values()]
+    .map((z) => ({
+      name: z.name,
+      lat: z.lat,
+      lng: z.lng,
+      orders: z.orders,
+      revenueCents: z.revenueCents,
+      partners: z.partnerNames.size,
+    }))
+    .sort((a, b) => b.orders - a.orders);
+
+  const partnerList = [...partners.values()]
+    .map((p) => ({
+      shopName: p.shopName,
+      orders: p.orders,
+      revenueCents: p.revenueCents,
+    }))
+    .sort((a, b) => b.orders - a.orders)
+    .slice(0, 10);
+
+  return {
+    agent: { code: agent.agent_code, name: agent.full_name },
+    days: safeDays,
+    totalDeliveries: rows.length,
+    zones: zoneList,
+    topPartners: partnerList,
   };
 }
 
@@ -1185,6 +1398,307 @@ async function getEarnings(rawCode) {
   };
 }
 
+// ── Overdue deliveries & rider problem reports ────────────────────────────────
+
+/**
+ * Rider reports a problem with their assigned delivery (e.g. customer
+ * unreachable, wrong address). Requires a reason; notifies admins and
+ * surfaces the order on the admin Overdue page.
+ */
+async function reportDeliveryIssue(rawCode, orderId, reason) {
+  await ensureOrderFlowSchema();
+  await ensureDeliveryIssueSchema();
+  const agent = await findAgent(rawCode);
+  const trimmed = String(reason || '').trim();
+  if (trimmed.length < 5) {
+    throw new AppError('Please describe the problem (at least 5 characters).', 400, 'REASON_REQUIRED');
+  }
+
+  const { rows } = await pool.query(
+    `UPDATE orders
+     SET delivery_issue_reason = $2,
+         delivery_issue_reported_at = NOW(),
+         delivery_issue_resolved = FALSE,
+         updated_at = NOW()
+     WHERE id = $1
+       AND delivery_agent_id = $3
+       AND delivered_at IS NULL
+       AND UPPER(COALESCE(status, '')) NOT IN
+         ('CANCELLED', 'CANCELED', 'DELIVERED', 'COMPLETED', 'RETURNED', 'REFUNDED', 'FAILED')
+     RETURNING id, delivery_code`,
+    [orderId, trimmed.slice(0, 1000), agent.id],
+  );
+  if (!rows[0]) {
+    throw new AppError('This delivery is not assigned to you or is already finished.', 409, 'NOT_ASSIGNED');
+  }
+
+  const { rows: admins } = await pool.query(
+    `SELECT id FROM users WHERE UPPER(role) IN ('ADMIN', 'SUPER_ADMIN')`,
+  );
+  for (const admin of admins) {
+    safeSendNotification(
+      admin.id,
+      'Delivery problem reported',
+      `Rider ${agent.full_name} reported an issue on order #${String(rows[0].delivery_code || orderId).slice(0, 8)}: ${trimmed.slice(0, 120)}`,
+      { orderId, type: 'DELIVERY_ISSUE', reason: trimmed.slice(0, 300) },
+    );
+  }
+  return { ok: true, orderId };
+}
+
+/**
+ * Admin: list deliveries that are overdue (> hours since accept) or have an
+ * unresolved rider-reported issue.
+ */
+async function listOverdueDeliveries({ hours = 24, includeResolved = false } = {}) {
+  await ensureOrderFlowSchema();
+  await ensureDeliveryIssueSchema();
+  const safeHours = Math.min(24 * 30, Math.max(1, Number(hours) || 24));
+  const { rows } = await pool.query(
+    `SELECT o.id, o.delivery_code, o.status, o.created_at, o.delivery_accepted_at,
+            o.delivery_accepted_at + ($1 || ' hours')::interval AS deadline_at,
+            o.delivery_issue_reason, o.delivery_issue_reported_at, o.delivery_issue_resolved,
+            o.delivery_fee_cents, o.rider_commission_cents,
+            o.shipping_address, o.handover_requested_at, o.rider_arrived_at,
+            u.full_name AS customer_name, u.phone AS customer_phone,
+            a.id AS agent_id, a.agent_code, a.full_name AS agent_name, a.phone AS agent_phone,
+            COALESCE(shop.shop_name, shop.business_name, 'Shop') AS shop_name,
+            COALESCE(shop.address, shop.city, 'Addis Ababa') AS shop_address
+     FROM orders o
+     JOIN users u ON u.id = o.user_id
+     JOIN delivery_agents a ON a.id = o.delivery_agent_id
+     LEFT JOIN LATERAL (
+       SELECT p.partner_id FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = o.id
+       LIMIT 1
+     ) sp ON true
+     LEFT JOIN partner_profile shop ON shop.user_id = sp.partner_id
+     WHERE o.delivered_at IS NULL
+       AND o.delivery_agent_id IS NOT NULL
+       AND UPPER(COALESCE(o.status, '')) NOT IN
+         ('CANCELLED', 'CANCELED', 'DELIVERED', 'COMPLETED', 'RETURNED', 'REFUNDED', 'FAILED')
+       AND (
+         o.delivery_accepted_at < NOW() - ($1 || ' hours')::interval
+         OR (o.delivery_issue_reason IS NOT NULL AND o.delivery_issue_resolved = FALSE)
+       )
+       AND ($2::boolean OR o.delivery_issue_resolved = FALSE)
+     ORDER BY o.delivery_accepted_at ASC NULLS LAST
+     LIMIT 200`,
+    [String(safeHours), includeResolved === true],
+  );
+
+  const orderIds = rows.map((r) => r.id);
+  const itemsByOrder = {};
+  if (orderIds.length > 0) {
+    const { rows: itemRows } = await pool.query(
+      `SELECT oi.order_id, p.name_en AS name, oi.quantity
+       FROM order_items oi JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = ANY($1::uuid[])`,
+      [orderIds],
+    );
+    for (const r of itemRows) {
+      (itemsByOrder[r.order_id] ||= []).push(`${r.name || 'Product'} x${Number(r.quantity) || 1}`);
+    }
+  }
+
+  return rows.map((r) => ({
+    id: r.id,
+    orderNumber: String(r.delivery_code || r.id).slice(0, 8).toUpperCase(),
+    status: r.status,
+    createdAt: r.created_at,
+    acceptedAt: r.delivery_accepted_at,
+    deadlineAt: r.deadline_at,
+    overdueHours: r.delivery_accepted_at
+      ? Math.max(0, Math.floor((Date.now() - new Date(r.delivery_accepted_at).getTime()) / 3600000))
+      : null,
+    issueReason: r.delivery_issue_reason || null,
+    issueReportedAt: r.delivery_issue_reported_at || null,
+    issueResolved: r.delivery_issue_resolved === true,
+    deliveryFeeCents: Number(r.delivery_fee_cents) || 0,
+    riderEarningCents: Math.max(0, (Number(r.delivery_fee_cents) || 0) - (Number(r.rider_commission_cents) || 0)),
+    customerName: r.customer_name,
+    customerPhone: r.customer_phone,
+    shippingAddress: r.shipping_address,
+    shopName: r.shop_name,
+    shopAddress: r.shop_address,
+    handoverRequestedAt: r.handover_requested_at,
+    riderArrivedAt: r.rider_arrived_at,
+    agent: {
+      id: r.agent_id,
+      agentCode: r.agent_code,
+      name: r.agent_name,
+      phone: r.agent_phone,
+    },
+    items: itemsByOrder[r.id] || [],
+  }));
+}
+
+/**
+ * Admin: reassign an in-flight delivery.
+ * - agentCode given → assign to that rider (they keep full control).
+ * - no agentCode → release back to the open offers pool (same reset as a
+ *   rider decline) so any available rider can pick it up.
+ */
+async function reassignDelivery(orderId, { agentCode } = {}) {
+  await ensureOrderFlowSchema();
+  await ensureDeliveryIssueSchema();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, status, delivery_agent_id, delivered_at, delivery_code
+       FROM orders WHERE id = $1 FOR UPDATE`,
+      [orderId],
+    );
+    const order = rows[0];
+    if (!order) throw new AppError('Order not found.', 404, 'ORDER_NOT_FOUND');
+    if (order.delivered_at ||
+        ['CANCELLED', 'CANCELED', 'DELIVERED', 'COMPLETED', 'RETURNED', 'REFUNDED', 'FAILED']
+          .includes(String(order.status || '').toUpperCase())) {
+      throw new AppError('This order is already finished.', 409, 'ORDER_FINISHED');
+    }
+
+    if (agentCode) {
+      const agent = await findAgent(agentCode); // throws if unknown/inactive
+      await client.query(
+        `UPDATE orders
+         SET delivery_agent_id = $2,
+             delivery_accepted_at = NOW(),
+             delivery_issue_resolved = TRUE,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [orderId, agent.id],
+      );
+      await client.query('COMMIT');
+      const { rows: admins } = await pool.query(
+        `SELECT id FROM users WHERE UPPER(role) IN ('ADMIN', 'SUPER_ADMIN')`,
+      );
+      for (const admin of admins) {
+        safeSendNotification(
+          admin.id,
+          'Delivery reassigned',
+          `Order #${String(order.delivery_code || orderId).slice(0, 8)} was reassigned to ${agent.full_name} (${agent.agent_code}).`,
+          { orderId, type: 'DELIVERY_REASSIGNED', agentCode: agent.agent_code },
+        );
+      }
+      return { ok: true, orderId, action: 'ASSIGNED', agentCode: agent.agent_code, agentName: agent.full_name };
+    }
+
+    // Release back to the offers pool — same reset as declineOffer.
+    await client.query(
+      `UPDATE orders
+       SET delivery_agent_id = NULL,
+           delivery_accepted_at = NULL,
+           handover_requested_at = NULL,
+           handover_proof = NULL,
+           handed_over_at = NULL,
+           handover_code = NULL,
+           rider_arrived_at = NULL,
+           delivery_issue_resolved = TRUE,
+           status = CASE WHEN status = 'SHIPPED' THEN 'PACKED' ELSE status END,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [orderId],
+    );
+    await client.query('COMMIT');
+    await notifyRidersOfNewOffer(orderId);
+    return { ok: true, orderId, action: 'RELEASED' };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Road route between two points via OSRM — returns distance, duration,
+ * geometry coordinates and turn steps for the rider navigation map.
+ */
+async function getRoute({ fromLat, fromLng, toLat, toLng }) {
+  const fLat = Number(fromLat), fLng = Number(fromLng);
+  const tLat = Number(toLat), tLng = Number(toLng);
+  if (![fLat, fLng, tLat, tLng].every(Number.isFinite) ||
+      Math.abs(fLat) > 90 || Math.abs(tLat) > 90 ||
+      Math.abs(fLng) > 180 || Math.abs(tLng) > 180) {
+    throw new AppError('Valid coordinates are required.', 400, 'INVALID_COORDS');
+  }
+  const url =
+    `https://router.project-osrm.org/route/v1/driving/` +
+    `${fLng},${fLat};${tLng},${tLat}` +
+    `?overview=full&geometries=geojson&steps=true`;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(9000),
+    headers: { 'User-Agent': 'ema-store-backend/1.0' },
+  });
+  if (!res.ok) throw new AppError('Routing service unavailable.', 502, 'ROUTING_FAILED');
+  const data = await res.json();
+  const route = data?.routes?.[0];
+  if (!route) throw new AppError('No route found between these points.', 404, 'NO_ROUTE');
+
+  const coords = (route.geometry?.coordinates ?? [])
+    .filter((c) => Array.isArray(c) && c.length >= 2)
+    .map((c) => [Number(c[1]), Number(c[0])]); // [lat, lng]
+
+  // Cumulative distance per vertex for progress tracking.
+  const cum = [0];
+  for (let i = 1; i < coords.length; i++) {
+    const [aLat, aLng] = coords[i - 1];
+    const [bLat, bLng] = coords[i];
+    const dLat = (bLat - aLat) * Math.PI / 180;
+    const dLng = (bLng - aLng) * Math.PI / 180;
+    const h = Math.sin(dLat / 2) ** 2 +
+      Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) *
+      Math.sin(dLng / 2) ** 2;
+    cum.push(cum[i - 1] + 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
+  }
+
+  const steps = [];
+  let stepStart = 0;
+  for (const leg of route.legs ?? []) {
+    for (const s of leg.steps ?? []) {
+      const m = s.maneuver ?? {};
+      const dist = Number(s.distance) || 0;
+      steps.push({
+        instruction: _stepInstruction(m.type, m.modifier, s.name),
+        startM: stepStart,
+        endM: stepStart + dist,
+        durationSec: Number(s.duration) || 0,
+      });
+      stepStart += dist;
+    }
+  }
+
+  return {
+    distanceM: Number(route.distance) || 0,
+    durationSec: Number(route.duration) || 0,
+    coordinates: coords,
+    cumDistance: cum,
+    steps,
+  };
+}
+
+function _stepInstruction(type, modifier, name) {
+  const on = name ? ` onto ${name}` : '';
+  switch (type) {
+    case 'depart': return `Head out${name ? ` onto ${name}` : ''}`;
+    case 'arrive': return 'Arrive at destination';
+    case 'turn': return `Turn ${modifier || ''}${on}`.replace(/\s+/g, ' ').trim();
+    case 'new name': return `Continue${on}`;
+    case 'merge': return `Merge ${modifier ? `${modifier} ` : ''}${on}`.trim();
+    case 'fork': return `Keep ${modifier || 'straight'}${on}`;
+    case 'on ramp': return `Take the ramp${on}`;
+    case 'off ramp': return `Take the exit${on}`;
+    case 'roundabout':
+    case 'rotary': return `Enter the roundabout${on}`;
+    case 'exit roundabout':
+    case 'exit rotary': return `Exit the roundabout${on}`;
+    case 'uturn': return `Make a U-turn${on}`;
+    default: return `Continue ${modifier ? `${modifier} ` : ''}${on}`.trim();
+  }
+}
+
 module.exports = {
   getAgentQr,
   listOffers,
@@ -1198,7 +1712,14 @@ module.exports = {
   getDeliveryHistory,
   getEarnings,
   getWalletTransactions,
+  getNotifications,
+  markNotificationsRead,
+  getDeliveryZones,
   updateAgentLocation,
   processOverdueDeliveries,
   notifyRidersOfNewOffer,
+  reportDeliveryIssue,
+  listOverdueDeliveries,
+  reassignDelivery,
+  getRoute,
 };

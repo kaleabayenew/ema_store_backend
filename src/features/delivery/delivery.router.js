@@ -23,8 +23,13 @@ router.get('/active/:orderId', ctrl.getActiveDelivery);
 router.get('/history', ctrl.getHistory);
 router.get('/earnings', ctrl.getEarnings);
 router.get('/wallet-transactions', ctrl.getWalletTransactions);
+router.get('/notifications', ctrl.getNotifications);
+router.post('/notifications/read-all', ctrl.markNotificationsRead);
+router.get('/zones', ctrl.getDeliveryZones);
+router.get('/route', ctrl.getRoute);
 router.post('/orders/:orderId/pickup/confirm', ctrl.confirmPickup);
 router.post('/orders/:orderId/deliver/scan', ctrl.scanDelivery);
+router.post('/orders/:orderId/problem', ctrl.reportIssue);
 router.post('/orders/:orderId/arrived', ctrl.markArrived);
 
 module.exports = router;

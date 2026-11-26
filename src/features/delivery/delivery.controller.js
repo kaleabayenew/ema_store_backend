@@ -57,6 +57,10 @@ const getHistory = async (req, res, next) => {
   try {
     const result = await service.getDeliveryHistory(agentCode(req), {
       limit: req.query.limit,
+      page: req.query.page,
+      from: req.query.from,
+      to: req.query.to,
+      status: req.query.status,
     });
     ok(res, result);
   } catch (err) {
@@ -79,6 +83,37 @@ const getWalletTransactions = async (req, res, next) => {
       page: req.query.page,
       limit: req.query.limit,
     });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getNotifications = async (req, res, next) => {
+  try {
+    const result = await service.getNotifications(agentCode(req), {
+      limit: req.query.limit,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getDeliveryZones = async (req, res, next) => {
+  try {
+    const result = await service.getDeliveryZones(agentCode(req), {
+      days: req.query.days,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const markNotificationsRead = async (req, res, next) => {
+  try {
+    const result = await service.markNotificationsRead(agentCode(req));
     ok(res, result);
   } catch (err) {
     next(err);
@@ -137,6 +172,33 @@ const scanDelivery = async (req, res, next) => {
   }
 };
 
+const reportIssue = async (req, res, next) => {
+  try {
+    const result = await service.reportDeliveryIssue(
+      agentCode(req),
+      req.params.orderId,
+      req.body?.reason,
+    );
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getRoute = async (req, res, next) => {
+  try {
+    const result = await service.getRoute({
+      fromLat: req.query.fromLat,
+      fromLng: req.query.fromLng,
+      toLat: req.query.toLat,
+      toLng: req.query.toLng,
+    });
+    ok(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   updateLocation,
   getQr,
@@ -148,7 +210,12 @@ module.exports = {
   getHistory,
   getEarnings,
   getWalletTransactions,
+  getNotifications,
+  markNotificationsRead,
+  getDeliveryZones,
   confirmPickup,
   scanDelivery,
   markArrived,
+  reportIssue,
+  getRoute,
 };
