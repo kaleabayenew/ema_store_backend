@@ -924,8 +924,7 @@ async function autoMigrate() {
             ('Telebirr', 'telebirr', 'https://upload.wikimedia.org/wikipedia/commons/4/42/Telebirr_Logo.png', 1, true),
             ('CBE Birr', 'cbe_birr', 'https://upload.wikimedia.org/wikipedia/commons/e/ea/Commercial_Bank_of_Ethiopia_logo.png', 2, true),
             ('Chapa', 'chapa', null, 3, true),
-            ('Awash Bank', 'awash', null, 4, true),
-            ('Cash on Delivery', 'cod', null, 5, true)
+            ('Awash Bank', 'awash', null, 4, true)
           ON CONFLICT (code) DO NOTHING;
         `);
       }
