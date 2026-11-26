@@ -146,6 +146,37 @@ const getPartnerById = async (req, res, next) => {
       createdAt: pr.created_at,
     }));
 
+    // Real wallet data — same ledger the partner app uses (wallet_transactions
+    // keyed by the partner's user id).
+    let wallet = null;
+    let transactions = [];
+    try {
+      const earningsSvc = require('../partner/earnings/earnings.service');
+      const [earnings, txResult] = await Promise.all([
+        earningsSvc.getEarnings(p.user_id),
+        earningsSvc.getTransactions(p.user_id, { page: 1, limit: 50 }),
+      ]);
+      wallet = {
+        availableBalanceCents: Math.round(
+          (earnings.available_balance ?? 0) * 100,
+        ),
+        settledPayoutCents: earnings.settledPayoutCents ?? 0,
+        pendingPayoutCents: earnings.pendingPayoutCents ?? 0,
+        totalRevenueCents: earnings.totalRevenueCents ?? 0,
+      };
+      transactions = (txResult.transactions || []).map((t) => ({
+        id: t.id,
+        title: t.title,
+        description: t.description,
+        amount: Number(t.amount) || 0,
+        type: t.type,
+        status: t.status,
+        createdAt: t.created_at,
+      }));
+    } catch (_) {
+      /* earnings tables may not exist yet — leave wallet null */
+    }
+
     ok(res, {
       partner: {
         id: p.id,
@@ -162,7 +193,13 @@ const getPartnerById = async (req, res, next) => {
         reviewCount: p.rating_count || 0,
         products: productList.length,
         productList,
-        revenue: p.total_sales ? `ETB ${(Number(p.total_sales) / 100).toLocaleString('en-ET')}` : 'ETB 0',
+        revenue: wallet
+          ? `ETB ${(wallet.totalRevenueCents / 100).toLocaleString('en-ET')}`
+          : p.total_sales
+            ? `ETB ${(Number(p.total_sales) / 100).toLocaleString('en-ET')}`
+            : 'ETB 0',
+        wallet,
+        transactions,
         status: p.is_verified ? 'APPROVED' : (p.is_active === false ? 'SUSPENDED' : 'PENDING'),
         createdAt: p.created_at,
       },

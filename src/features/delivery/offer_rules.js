@@ -16,12 +16,8 @@ function getOfferAcceptanceBlock(order) {
   const paymentStatus = String(
     order.payment_status || order.paymentStatus || 'PENDING',
   ).trim().toUpperCase();
-  const paymentMethod = String(
-    order.payment_method || order.paymentMethod || '',
-  );
-  const isCashOnDelivery = /cash|cod/i.test(paymentMethod);
 
-  if (paymentStatus !== 'PAID' && !isCashOnDelivery) {
+  if (paymentStatus !== 'PAID') {
     return {
       code: 'PAYMENT_NOT_CONFIRMED',
       message: 'Payment must be confirmed before a rider can accept this order.',
